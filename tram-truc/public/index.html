@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Trạm trực</title>
+<meta name="theme-color" content="#F1F3F2">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Trạm trực">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+
+<div class="toast hide" id="toast"><span class="b"></span>
+  <div><div class="tt" id="tt"></div><div class="ts" id="ts"></div></div></div>
+
+<div id="gate" class="gate" hidden></div>
+<div id="app" class="wrap" hidden></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const pad = n => String(n).padStart(2, '0');
+const clk = s => (s < 0 ? '-' : '') + pad(Math.floor(Math.abs(s) / 60)) + ':' + pad(Math.abs(s) % 60);
+const hhmm = t => pad(new Date(t).getHours()) + ':' + pad(new Date(t).getMinutes());
+const DOW = ['Chủ Nhật','Thứ Hai','Thứ Ba','Thứ Tư','Thứ Năm','Thứ Sáu','Thứ Bảy'];
+
+let S = null, skew = 0, busy = false;
+const nowMs = () => Date.now() + skew;
+const leftOf = i => Math.round((i.started_at + i.limit_minutes * 60000 - nowMs()) / 1000);
+const pctOf  = i => Math.min(100, ((nowMs() - i.started_at) / (i.limit_minutes * 60000)) * 100);
+
+function toast(t, s, ok) {
+  const el = $('#toast');
+  el.classList.toggle('err', !ok); el.classList.remove('hide');
+  $('#tt').textContent = t; $('#ts').textContent = s || '';
+  clearTimeout(toast._t); toast._t = setTimeout(() => el.classList.add('hide'), 4000);
+}
+
+/* ---------- Màn chặn ---------- */
+const GATES = {
+  nokey: { ic: '⊘', h: 'Link không hợp lệ',
+    p: 'Link này không tồn tại hoặc đã bị thu hồi. Liên hệ quản lý để nhận link mới.' },
+  device: { ic: '⊗', h: 'Link đã gắn với thiết bị khác',
+    p: 'Mỗi link chỉ dùng được trên một thiết bị. Nếu bạn vừa đổi máy, nhờ quản lý gỡ thiết bị cũ giúp.' },
+  none: { ic: '→', h: 'Cần link riêng để vào',
+    p: 'Mở link quản lý đã gửi cho bạn. Lưu vào màn hình chính để lần sau vào thẳng, không phải nhập gì.' },
+};
+
+function showGate(kind) {
+  const g = GATES[kind] || GATES.none;
+  $('#app').hidden = true; $('#gate').hidden = false;
+  $('#gate').innerHTML = `<div class="card">
+    <div class="ic">${g.ic}</div>
+    <h1>${g.h}</h1><p>${g.p}</p>
+    <p style="margin-top:22px;font-size:13px;color:var(--tx3)">Bạn là quản lý?
+      <a href="/admin" style="color:var(--pri);font-weight:600">Đăng nhập tại đây</a></p>
+  </div>`;
+}
+
+/* ---------- Gọi API ---------- */
+async function api(url, body) {
+  const r = await fetch(url, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body || {}),
+  });
+  return { status: r.status, ...(await r.json().catch(() => ({}))) };
+}
+
+async function load() {
+  const r = await fetch('/api/state');
+  if (r.status === 401) {
+    const e = new URLSearchParams(location.search).get('e');
+    showGate(e || 'none');
+    return;
+  }
+  const d = await r.json();
+  skew = d.server_time - Date.now();
+  S = d;
+  $('#gate').hidden = true; $('#app').hidden = false;
+  render();
+}
+
+async function act(url, body) {
+  if (busy) return; busy = true;
+  const r = await api(url, body);
+  busy = false;
+  if (r.state) { S = r.state; skew = S.server_time - Date.now(); render(); }
+  toast(r.ok ? 'Đã ghi nhận' : 'Chưa thực hiện được', r.message || '', !!r.ok);
+  if (!r.ok) load();
+}
+
+/* ---------- Vẽ ---------- */
+function render() {
+  const d = new Date(nowMs());
+  const mine = S.current, locked = S.locked_by;
+  const left = mine ? leftOf(mine) : 0;
+  const over = mine && left < 0;
+
+  /* Thẻ đồng hồ — khi đang rời vị trí thì chính nó thành đếm ngược */
+  const hero = `<div class="card hero ${mine ? 'run' : ''} ${over ? 'over' : ''}" id="hero">
+    <div class="lb" id="heroLb">${mine ? mine.type_name : 'Thời gian hiện tại'}</div>
+    <div class="big" id="big">${mine ? clk(left)
+      : `${pad(d.getHours())}<span class="s">:</span>${pad(d.getMinutes())}<span class="s">:</span>${pad(d.getSeconds())}`}</div>
+    <div class="sub" id="heroSub">${mine
+      ? `Bắt đầu ${hhmm(mine.started_at)} · cho phép ${mine.limit_minutes} phút`
+      : `${DOW[d.getDay()]}, ${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()}`}</div>
+    ${mine ? `<div class="bar-track"><i id="trk" style="width:${pctOf(mine)}%"></i></div>` : `
+      <div class="tags">
+        <span class="pill">${S.me.department || '—'}</span>
+        ${S.me.brand ? `<span class="pill pri">${S.me.brand}</span>` : ''}
+      </div>`}
+  </div>`;
+
+  /* Trạng thái bộ phận */
+  const holder = mine || locked;
+  const hLeft = holder ? leftOf(holder) : 0;
+  const dep = `<div class="card">
+    <div class="dep ${holder ? (hLeft < 0 ? 'over' : 'busy') : ''}">
+      <div class="ic">${(S.me.department || '?').slice(0, 2)}</div>
+      <div class="m">
+        ${holder
+          ? `<div class="a">${mine ? 'Bạn đang rời vị trí' : holder.user_name}</div>
+             <div class="b">${holder.type_name} · bộ phận đang khóa</div>`
+          : `<div class="a">Bộ phận đang trống</div>
+             <div class="b">${S.lane.headcount} nhân sự · bạn đi được</div>`}
+      </div>
+      ${holder ? `<div class="cd" data-cd="${holder.id}">${clk(hLeft)}</div>` : ''}
+    </div>
+  </div>`;
+
+  /* Hành động */
+  let action;
+  if (mine) {
+    action = `<div class="card card-p">
+      <button class="btn btn-dark btn-block" style="min-height:56px;font-size:17px;font-weight:700"
+        onclick="act('/api/stop')">Dừng lại</button>
+    </div>`;
+  } else {
+    action = `<div class="card">
+      <div class="card-h"><span class="t">Rời vị trí</span></div>
+      ${locked ? `<div class="blocked" style="margin-top:14px">
+          <b>${locked.user_name}</b> đang “${locked.type_name}”. Chờ đến lượt rồi bấm lại.</div>` : ''}
+      <div class="acts">${S.types.map(t => `
+        <button class="act" ${t.disabled ? 'disabled' : ''} onclick="act('/api/start',{code:'${t.code}'})">
+          <div class="n">${t.name}</div>
+          <div class="d">${t.limit_minutes} phút${t.counts_toward_limit ? '' : ' · không khóa'}</div>
+        </button>`).join('')}</div>
+    </div>`;
+  }
+
+  /* Hôm nay */
+  const T = S.today;
+  const today = `<div class="card">
+    <div class="card-h"><span class="t">Hôm nay</span>
+      <span class="r">${T.count ? T.count + ' lượt' : 'chưa có lượt nào'}</span></div>
+    <div class="sum">
+      <div><div class="n">${T.count}</div><div class="l">Lượt</div></div>
+      <div><div class="n">${T.minutes}</div><div class="l">Phút</div></div>
+      <div><div class="n ${T.over ? 'red' : ''}">${T.over}</div><div class="l">Quá giờ</div></div>
+    </div>
+    ${T.rows.length ? `<div class="log">${T.rows.map(r => `
+      <div class="r"><span class="t">${hhmm(r.started_at)}</span>
+        <span class="n">${r.type_name}${r.closed_by === 'auto' ? ' · quên bấm dừng' : ''}</span>
+        <span class="d ${r.is_over_limit ? 'red' : ''}">${r.duration_sec == null ? 'đang chạy'
+          : Math.floor(r.duration_sec / 60) + 'p' + pad(r.duration_sec % 60)}</span></div>`).join('')}</div>` : ''}
+  </div>`;
+
+  $('#app').innerHTML = `
+    <div class="bar">
+      <span class="nm">${S.me.name}</span>
+      <span class="sp"></span>
+      ${S.me.role === 'admin' ? '<a class="pill" href="/admin">Quản trị</a>' : ''}
+    </div>
+    ${hero}${dep}${action}${today}
+    <div class="hint">Mỗi bộ phận chỉ 1 người rời chỗ cùng lúc.<br>
+      Quên bấm “Dừng lại” thì hệ thống tự đóng sau khi quá giờ 30 phút và ghi chú lại.</div>`;
+}
+
+/* ---------- Nhịp giây ---------- */
+function tick() {
+  if (!S) return;
+  const mine = S.current, big = $('#big'), hero = $('#hero'), trk = $('#trk');
+
+  if (big) {
+    if (mine) {
+      const l = leftOf(mine);
+      big.textContent = clk(l);
+      hero.classList.toggle('over', l < 0);
+      if (trk) trk.style.width = pctOf(mine) + '%';
+      const sub = $('#heroSub');
+      if (sub && l < 0) sub.textContent =
+        `Bắt đầu ${hhmm(mine.started_at)} · đã quá ${Math.floor(-l / 60)} phút`;
+    } else {
+      const d = new Date(nowMs());
+      big.innerHTML = `${pad(d.getHours())}<span class="s">:</span>${pad(d.getMinutes())}<span class="s">:</span>${pad(d.getSeconds())}`;
+    }
+  }
+
+  document.querySelectorAll('[data-cd]').forEach(el => {
+    const h = (S.current && S.current.id == el.dataset.cd) ? S.current
+            : (S.locked_by && S.locked_by.id == el.dataset.cd) ? S.locked_by : null;
+    if (!h) return;
+    const l = leftOf(h);
+    el.textContent = clk(l);
+    const box = el.closest('.dep');
+    if (box && l < 0) { box.classList.add('over'); box.classList.remove('busy'); }
+  });
+}
+
+load();
+setInterval(tick, 1000);
+setInterval(load, 20000);   // đếm ngược chạy cục bộ nên không cần hỏi server dày hơn
+document.addEventListener('visibilitychange', () => { if (!document.hidden) load(); });
+</script>
+</body>
+</html>
