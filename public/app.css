@@ -169,6 +169,13 @@ button:focus-visible,a:focus-visible{outline:2px solid var(--pri);outline-offset
 /* Hạn mức có thể lên tới 15 ngày nên ô đã chọn cần nổi rõ khi nhìn lướt */
 .od.on{box-shadow:inset 0 0 0 1px rgba(255,255,255,.25)}
 .od.today{border-color:var(--amb)}
+/* Xin nghỉ nhưng lịch vẫn xếp ca — gạch ngang số để thấy ngay là không được duyệt */
+.od.on.rejected{background:var(--red);border-color:var(--red);text-decoration:line-through;opacity:.9}
+/* Lịch cho nghỉ mà mình không đăng ký */
+.od.rosteroff{background:var(--pri-s);color:var(--pri);border-color:#CFE5DD}
+.offlegend .sw.rejected{background:var(--red);border-color:var(--red)}
+.offlegend .sw.rosteroff{background:var(--pri-s);border-color:#CFE5DD}
+.offnote{padding:12px 18px 0;font-size:13px;color:var(--tx2);line-height:1.55}
 .od:disabled{opacity:.4;cursor:not-allowed}
 /* Ngày đã có người cùng bộ phận nhận — gạch chéo nhẹ để phân biệt với ngày hết hạn mức */
 .od.busy{background:repeating-linear-gradient(45deg,#F4F6F5,#F4F6F5 4px,#E7EBE9 4px,#E7EBE9 8px);
@@ -287,6 +294,9 @@ td.wide,th.wide{width:100%;white-space:normal}
 .daytag span{opacity:.5;font-weight:400}
 .daytag:hover{background:#DCEBE5}
 .daytag:hover span{opacity:1;color:var(--red)}
+/* Ngày xin nghỉ nhưng lịch vẫn xếp ca */
+.daytag.bad{background:var(--red-s);border-color:var(--red-l);color:var(--red);text-decoration:line-through}
+.daytag.bad:hover{background:#F8DEDA}
 
 /* ===== Toast ===== */
 .toast{position:fixed;left:50%;bottom:20px;transform:translateX(-50%);z-index:200;
