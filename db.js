@@ -77,7 +77,44 @@ CREATE TABLE IF NOT EXISTS audit_log (
   actor_id INTEGER, actor_name TEXT,
   action TEXT NOT NULL, detail TEXT, ip TEXT, at INTEGER NOT NULL
 );
+
+-- Chấm công ca: lên ca / xuống ca / chấm công lẻ
+CREATE TABLE IF NOT EXISTS punches (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  kind         TEXT    NOT NULL,          -- in | out | log
+  brand        TEXT, department TEXT,
+  scheduled_at INTEGER,                   -- NULL với loại 'log'
+  actual_at    INTEGER NOT NULL,
+  late_minutes INTEGER NOT NULL DEFAULT 0,
+  late_level   TEXT,                      -- in5 | in30 | out60
+  ip TEXT, user_agent TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_p_user ON punches(user_id, actual_at);
+CREATE INDEX IF NOT EXISTS idx_p_late ON punches(late_level, actual_at);
+
+-- Lịch off: mỗi dòng là một ngày nghỉ đã đăng ký
+CREATE TABLE IF NOT EXISTS day_offs (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  day        TEXT    NOT NULL,            -- YYYY-MM-DD
+  created_at INTEGER NOT NULL,
+  UNIQUE(user_id, day)
+);
+
+-- Quản trị khóa tháng để nhân viên không sửa được nữa
+CREATE TABLE IF NOT EXISTS off_locks (
+  ym        TEXT PRIMARY KEY,             -- YYYY-MM
+  locked_at INTEGER NOT NULL
+);
 `);
+
+// Cột giờ ca — thêm sau nên dùng ALTER có kiểm tra, tránh lỗi khi chạy lại
+{
+  const cols = db.prepare('PRAGMA table_info(users)').all().map((c) => c.name);
+  if (!cols.includes('shift_start')) db.exec("ALTER TABLE users ADD COLUMN shift_start TEXT NOT NULL DEFAULT '09:00'");
+  if (!cols.includes('shift_end'))   db.exec("ALTER TABLE users ADD COLUMN shift_end   TEXT NOT NULL DEFAULT '18:00'");
+}
 
 /* ============================================================
    SEED
@@ -316,9 +353,210 @@ function history(f = {}) {
   };
 }
 
+/* ============================================================
+   CHẤM CÔNG CA — Lên ca / Xuống ca / Chấm công
+   ============================================================ */
+const PUNCH_KINDS = { in: 'Lên ca', out: 'Xuống ca', log: 'Chấm công' };
+
+const LATE_LEVELS = {
+  in5:   { label: 'Trễ lên ca ~5p',    kind: 'in',  min: 5 },
+  in30:  { label: 'Trễ lên ca ~30p',   kind: 'in',  min: 30 },
+  out60: { label: 'Trễ xuống ca ~60p', kind: 'out', min: 60 },
+};
+const MAX_OFF_PER_MONTH = Math.max(1, Number(process.env.MAX_OFF_PER_MONTH) || 15);
+
+/* Mốc giờ theo lịch của một lần chấm, tính từ giờ ca của nhân viên.
+   Ca qua đêm (vd 22:00–06:00) thì giờ xuống ca rơi sang ngày hôm sau. */
+function scheduledFor(user, kind, at = now()) {
+  if (kind === 'log') return null;
+
+  const [sh, sm] = String(user.shift_start || '09:00').split(':').map(Number);
+  const [eh, em] = String(user.shift_end || '18:00').split(':').map(Number);
+
+  const base = new Date(at); base.setHours(0, 0, 0, 0);
+  const start = new Date(base); start.setHours(sh, sm, 0, 0);
+  const end = new Date(base);   end.setHours(eh, em, 0, 0);
+  if (end <= start) end.setDate(end.getDate() + 1);   // ca qua đêm
+
+  if (kind === 'in') {
+    // Bấm lúc rạng sáng thì thuộc ca bắt đầu từ hôm trước
+    if (at < start.getTime() - 12 * 3600000) start.setDate(start.getDate() - 1);
+    return start.getTime();
+  }
+  if (at < start.getTime()) end.setDate(end.getDate() - 1);
+  return end.getTime();
+}
+
+function lateOf(kind, diffMin) {
+  if (diffMin <= 0) return null;
+  if (kind === 'in')  return diffMin >= 30 ? 'in30' : (diffMin >= 5 ? 'in5' : null);
+  if (kind === 'out') return diffMin >= 60 ? 'out60' : null;
+  return null;
+}
+
+function punch(user, kind, ip, ua) {
+  if (!PUNCH_KINDS[kind]) return { ok: false, message: 'Loại chấm công không hợp lệ.' };
+
+  const at = now();
+  const sched = scheduledFor(user, kind, at);
+  const diff = sched ? Math.round((at - sched) / 60000) : 0;
+  const level = lateOf(kind, diff);
+  const hhmm = new Date(at).toLocaleTimeString('vi-VN', { hour12: false });
+
+  db.prepare(`INSERT INTO punches
+    (user_id,kind,brand,department,scheduled_at,actual_at,late_minutes,late_level,ip,user_agent)
+    VALUES (?,?,?,?,?,?,?,?,?,?)`).run(
+    user.id, kind, user.brand, user.department, sched, at,
+    Math.max(0, diff), level, ip, (ua || '').slice(0, 400));
+
+  return {
+    ok: true, late_level: level,
+    message: level
+      ? `${PUNCH_KINDS[kind]} lúc ${hhmm} — ${LATE_LEVELS[level].label} (${diff} phút).`
+      : `${PUNCH_KINDS[kind]} lúc ${hhmm}.`,
+  };
+}
+
+/* Trạng thái ca hôm nay */
+function shiftToday(user) {
+  const from = new Date(); from.setHours(0, 0, 0, 0);
+  const rows = db.prepare('SELECT * FROM punches WHERE user_id=? AND actual_at>=? ORDER BY actual_at')
+    .all(user.id, from.getTime() - 12 * 3600000);   // lùi 12h để bắt ca đêm
+
+  const lastIn = [...rows].reverse().find((r) => r.kind === 'in');
+  const lastOut = [...rows].reverse().find((r) => r.kind === 'out');
+
+  return {
+    on_shift: !!(lastIn && (!lastOut || lastOut.actual_at < lastIn.actual_at)),
+    checked_in_at: lastIn ? lastIn.actual_at : null,
+    checked_out_at: lastOut ? lastOut.actual_at : null,
+    shift_start: user.shift_start, shift_end: user.shift_end,
+    rows: rows.map((r) => ({
+      kind: r.kind, kind_label: PUNCH_KINDS[r.kind], actual_at: r.actual_at,
+      late_minutes: r.late_minutes, late_level: r.late_level,
+      late_label: r.late_level ? LATE_LEVELS[r.late_level].label : null,
+    })),
+  };
+}
+
+/* Lịch sử chấm công — quản trị xem hết, nhân viên chỉ thấy của mình */
+function punchHistory(f = {}, viewer = null) {
+  const w = [], p = [];
+  if (viewer && viewer.role !== 'admin') { w.push('p.user_id=?'); p.push(viewer.id); }
+  else if (f.user_id) { w.push('p.user_id=?'); p.push(f.user_id); }
+  if (f.kind)       { w.push('p.kind=?');       p.push(f.kind); }
+  if (f.department) { w.push('p.department=?'); p.push(f.department); }
+  if (f.brand)      { w.push('p.brand=?');      p.push(f.brand); }
+  if (f.from)       { w.push('p.actual_at>=?'); p.push(new Date(f.from + 'T00:00:00').getTime()); }
+  if (f.to)         { w.push('p.actual_at<=?'); p.push(new Date(f.to + 'T23:59:59').getTime()); }
+  if (f.late_level) { w.push('p.late_level=?'); p.push(f.late_level); }
+  if (f.only_late)  w.push('p.late_level IS NOT NULL');
+
+  const where = w.length ? 'WHERE ' + w.join(' AND ') : '';
+  const rows = db.prepare(
+    `SELECT p.*, u.name user_name FROM punches p JOIN users u ON u.id=p.user_id
+     ${where} ORDER BY p.actual_at DESC LIMIT ?`).all(...p, Math.min(+f.limit || 300, 100000));
+
+  const s = db.prepare(
+    `SELECT COUNT(*) total,
+            SUM(CASE WHEN p.late_level='in5'   THEN 1 ELSE 0 END) a,
+            SUM(CASE WHEN p.late_level='in30'  THEN 1 ELSE 0 END) b,
+            SUM(CASE WHEN p.late_level='out60' THEN 1 ELSE 0 END) c
+     FROM punches p ${where}`).get(...p);
+
+  return {
+    rows: rows.map((r) => ({
+      id: r.id, user_name: r.user_name, user_id: r.user_id,
+      kind: r.kind, kind_label: PUNCH_KINDS[r.kind],
+      brand: r.brand, department: r.department,
+      scheduled_at: r.scheduled_at, actual_at: r.actual_at,
+      late_minutes: r.late_minutes, late_level: r.late_level,
+      late_label: r.late_level ? LATE_LEVELS[r.late_level].label : null, ip: r.ip,
+    })),
+    stats: {
+      total: s.total || 0, in5: s.a || 0, in30: s.b || 0, out60: s.c || 0,
+      late: (s.a || 0) + (s.b || 0) + (s.c || 0),
+    },
+  };
+}
+
+/* ============================================================
+   LỊCH OFF
+   ============================================================ */
+const ymOf = (day) => String(day).slice(0, 7);
+const isLocked = (ym) => !!db.prepare('SELECT 1 FROM off_locks WHERE ym=?').get(ym);
+
+function myOffs(user, ym) {
+  const days = db.prepare('SELECT day FROM day_offs WHERE user_id=? AND day LIKE ? ORDER BY day')
+    .all(user.id, ym + '%').map((r) => r.day);
+  return { ym, days, used: days.length, max: MAX_OFF_PER_MONTH, locked: isLocked(ym) };
+}
+
+function toggleOff(user, day, byAdmin = false) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return { ok: false, message: 'Ngày không hợp lệ.' };
+  const ym = ymOf(day);
+  if (isLocked(ym) && !byAdmin) {
+    return { ok: false, message: `Tháng ${ym} đã bị khóa. Liên hệ quản lý nếu cần đổi.` };
+  }
+
+  const has = db.prepare('SELECT id FROM day_offs WHERE user_id=? AND day=?').get(user.id, day);
+  const dm = day.split('-').reverse().join('/');
+  if (has) {
+    db.prepare('DELETE FROM day_offs WHERE id=?').run(has.id);
+    return { ok: true, message: `Đã bỏ ngày nghỉ ${dm}.`, off: myOffs(user, ym) };
+  }
+
+  const used = db.prepare('SELECT COUNT(*) n FROM day_offs WHERE user_id=? AND day LIKE ?')
+    .get(user.id, ym + '%').n;
+  if (used >= MAX_OFF_PER_MONTH && !byAdmin) {
+    return { ok: false, message: `Tháng này đã đủ ${MAX_OFF_PER_MONTH} ngày. Bỏ bớt ngày khác rồi chọn lại.` };
+  }
+
+  db.prepare('INSERT INTO day_offs (user_id,day,created_at) VALUES (?,?,?)').run(user.id, day, now());
+  return { ok: true, message: `Đã đăng ký nghỉ ${dm}.`, off: myOffs(user, ym) };
+}
+
+/* Tổng hợp cho quản trị: Tất cả / Chưa đăng ký / 1 / 2 / 3 / 4 ngày */
+function offSummary(ym, filter = '') {
+  const rows = db.prepare(
+    `SELECT u.id, u.name, u.department, u.brand,
+            (SELECT COUNT(*) FROM day_offs d WHERE d.user_id=u.id AND d.day LIKE ?) n,
+            (SELECT GROUP_CONCAT(d.day) FROM day_offs d WHERE d.user_id=u.id AND d.day LIKE ?) days
+     FROM users u WHERE u.role='staff' AND u.is_active=1
+     ORDER BY u.department, u.name`).all(ym + '%', ym + '%');
+
+  const shaped = rows.map((r) => ({ ...r, days: r.days ? r.days.split(',').sort() : [] }));
+
+  return {
+    ym, locked: isLocked(ym), max: MAX_OFF_PER_MONTH,
+    rows: shaped.filter((r) => {
+      if (filter === 'none')    return r.n === 0;
+      if (filter === 'partial') return r.n > 0 && r.n < MAX_OFF_PER_MONTH;
+      if (filter === 'full')    return r.n >= MAX_OFF_PER_MONTH;
+      if (/^\d{1,2}$/.test(filter)) return r.n === +filter;
+      return true;
+    }),
+    counts: {
+      all: rows.length,
+      none: rows.filter((r) => r.n === 0).length,
+      partial: rows.filter((r) => r.n > 0 && r.n < MAX_OFF_PER_MONTH).length,
+      full: rows.filter((r) => r.n >= MAX_OFF_PER_MONTH).length,
+      // Số người theo từng mức cụ thể, dùng cho ô chọn chi tiết
+      byDays: Array.from({ length: MAX_OFF_PER_MONTH }, (_, i) =>
+        rows.filter((r) => r.n === i + 1).length),
+    },
+  };
+}
+
+function setLock(ym, locked) {
+  if (locked) db.prepare('INSERT OR REPLACE INTO off_locks (ym,locked_at) VALUES (?,?)').run(ym, now());
+  else db.prepare('DELETE FROM off_locks WHERE ym=?').run(ym);
+  return { ok: true, message: locked ? `Đã khóa lịch off tháng ${ym}.` : `Đã mở lịch off tháng ${ym}.` };
+}
+
 const allUsers = () =>
   db.prepare(
-    `SELECT id,name,key,department,brand,role,is_active,device_id,device_seen_at
+    `SELECT id,name,key,department,brand,role,is_active,device_id,device_seen_at,shift_start,shift_end
      FROM users ORDER BY role DESC, department, name`
   ).all().map((u) => ({ ...u, bound: !!u.device_id }));
 
@@ -331,4 +569,7 @@ module.exports = {
   db, DEPTS, BRANDS, AUTO_CLOSE_GRACE_MIN, newKey,
   types, typeByCode, sweepStale, openFor, holderOf, lanes, present,
   startActivity, stopActivity, stateFor, history, allUsers, audit, lockKey,
+  PUNCH_KINDS, LATE_LEVELS, MAX_OFF_PER_MONTH,
+  punch, shiftToday, punchHistory, scheduledFor,
+  myOffs, toggleOff, offSummary, setLock, isLocked,
 };
