@@ -300,11 +300,36 @@ async function schImport(mode) {
   const out = $('#schOut');
   out.textContent = 'Đang đọc file…';
 
-  const r = await fetch(`/api/admin/schedule/import?ym=${ym}&mode=${mode}`, {
-    method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: f,
-  }).then(x => x.json()).catch(() => ({ ok: false, message: 'Lỗi mạng.' }));
+  let res, r;
+  try {
+    res = await fetch(`/api/admin/schedule/import?ym=${ym}&mode=${mode}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: f,
+    });
+  } catch (e) {
+    out.innerHTML = `<b style="color:var(--red)">Không gọi được máy chủ.</b> Kiểm tra kết nối rồi thử lại.`;
+    return;
+  }
 
-  if (!r.ok) { out.innerHTML = `<b style="color:var(--red)">${esc(r.message || 'Không đọc được file.')}</b>`; return; }
+  // Máy chủ trả về HTML thay vì JSON = route chưa tồn tại hoặc app lỗi.
+  // Nói rõ mã lỗi thay vì gộp hết thành "lỗi mạng".
+  const ctype = res.headers.get('content-type') || '';
+  if (!ctype.includes('application/json')) {
+    const why = res.status === 404
+      ? 'Máy chủ chưa có chức năng nhập lịch — <b>server.js và schedule.js trên máy chủ chưa được cập nhật</b>. Đẩy đủ 3 file <span class="mono">server.js</span>, <span class="mono">schedule.js</span>, <span class="mono">package.json</span> rồi deploy lại.'
+      : res.status === 413 ? 'File quá lớn (giới hạn 8MB). Xoá bớt sheet thừa hoặc lưu lại dạng .csv.'
+      : res.status === 401 || res.status === 403 ? 'Phiên đăng nhập đã hết. Tải lại trang và đăng nhập lại.'
+      : `Máy chủ trả về lỗi ${res.status}. Xem tab Logs trên Render để biết chi tiết.`;
+    out.innerHTML = `<b style="color:var(--red)">Lỗi ${res.status}.</b> ${why}`;
+    return;
+  }
+
+  r = await res.json().catch(() => ({ ok: false, message: 'Máy chủ trả về dữ liệu không đọc được.' }));
+
+  if (!r.ok) {
+    out.innerHTML = `<b style="color:var(--red)">${esc(r.message || 'Không đọc được file.')}</b>`
+      + (r.errors && r.errors.length ? `<br>${r.errors.slice(0, 5).map(esc).join('<br>')}` : '');
+    return;
+  }
 
   const parts = [];
   if (r.preview) {
@@ -457,17 +482,26 @@ async function loadLate() {
 
 /* ---------- Lịch off ---------- */
 let offYm = new Date().toISOString().slice(0, 7);
-let offFilter = '';
+let offQ = { filter: '', user_id: '', department: '', brand: '' };
+
+function offReadFilters() {
+  document.querySelectorAll('[data-o]').forEach(el => {
+    const k = el.dataset.o;
+    if (k === 'filter2') return;              // ô "số ngày" ghi vào cùng khoá filter
+    offQ[k] = el.value;
+  });
+}
+function offSetDays(v) { offQ.filter = v; loadOffs(); }
+function offClear() { offQ = { filter: '', user_id: '', department: '', brand: '' }; loadOffs(); }
 
 async function loadOffs() {
-  const r = await fetch(`/api/admin/offs?ym=${offYm}&filter=${offFilter}`);
+  if (document.querySelector('[data-o]')) offReadFilters();
+  const qs = new URLSearchParams({ ym: offYm, ...offQ });
+  const r = await fetch('/api/admin/offs?' + qs);
   if (r.status === 401) return location.reload();
   const d = await r.json();
   const [y, m] = d.ym.split('-').map(Number);
 
-  const chip = (v, label, n) =>
-    `<button class="chip ${offFilter === v ? 'on' : ''}" onclick="offFilter='${v}';loadOffs()">
-      ${label}${n !== undefined ? ` <b>${n}</b>` : ''}</button>`;
 
   const trs = d.rows.map(u => `<tr>
     <td class="wide"><div style="font-weight:600">${esc(u.name)}</div>
@@ -520,17 +554,34 @@ async function loadOffs() {
           : ' — hiện chưa nhập lịch tháng này nên chưa đối chiếu được'}.
       </div>
     </div>
-    <div class="chips">
-      ${chip('', 'Tất cả', d.counts.all)}
-      ${chip('none', 'Chưa đăng ký', d.counts.none)}
-      ${chip('partial', 'Chưa đủ', d.counts.partial)}
-      ${chip('full', `Đủ ${d.max} ngày`, d.counts.full)}
-      ${d.has_schedule ? chip('conflict', 'Chưa đáp ứng', d.counts.conflict) : ''}
-      <select style="width:auto;min-width:150px" onchange="offFilter=this.value;loadOffs()">
-        <option value="">— Chọn số ngày —</option>
-        ${d.counts.byDays.map((n, i) => `<option value="${i + 1}" ${offFilter == String(i + 1) ? 'selected' : ''}
-          ${n ? '' : 'disabled'}>${i + 1} ngày${n ? ` · ${n} người` : ' · không có ai'}</option>`).join('')}
-      </select>
+    <div class="fil">
+      <div class="f"><label>Nhân viên</label>
+        <select data-o="user_id" onchange="loadOffs()"><option value="">Tất cả</option>
+          ${d.users.map(u => `<option value="${u.id}" ${offQ.user_id == u.id ? 'selected' : ''}>${esc(u.name)}</option>`).join('')}
+        </select></div>
+      <div class="f"><label>Bộ phận</label>
+        <select data-o="department" onchange="loadOffs()"><option value="">Tất cả</option>
+          ${d.departments.map(x => `<option ${offQ.department === x ? 'selected' : ''}>${x}</option>`).join('')}
+        </select></div>
+      <div class="f"><label>Brand</label>
+        <select data-o="brand" onchange="loadOffs()"><option value="">Tất cả</option>
+          ${d.brands.map(x => `<option ${offQ.brand === x ? 'selected' : ''}>${x}</option>`).join('')}
+        </select></div>
+      <div class="f" style="min-width:168px"><label>Trạng thái</label>
+        <select data-o="filter" onchange="loadOffs()">
+          <option value="">Tất cả · ${d.counts.all}</option>
+          <option value="none" ${offQ.filter === 'none' ? 'selected' : ''}>Chưa đăng ký · ${d.counts.none}</option>
+          <option value="partial" ${offQ.filter === 'partial' ? 'selected' : ''}>Chưa đủ ${d.max} ngày · ${d.counts.partial}</option>
+          <option value="full" ${offQ.filter === 'full' ? 'selected' : ''}>Đủ ${d.max} ngày · ${d.counts.full}</option>
+          ${d.has_schedule ? `<option value="conflict" ${offQ.filter === 'conflict' ? 'selected' : ''}>Chưa đáp ứng nguyện vọng · ${d.counts.conflict}</option>` : ''}
+        </select></div>
+      <div class="f" style="min-width:150px"><label>Số ngày đã đăng ký</label>
+        <select data-o="filter2" onchange="offSetDays(this.value)">
+          <option value="">Tất cả</option>
+          ${d.counts.byDays.map((n, i) => `<option value="${i + 1}" ${offQ.filter == String(i + 1) ? 'selected' : ''}
+            ${n ? '' : 'disabled'}>${i + 1} ngày · ${n} người</option>`).join('')}
+        </select></div>
+      <button class="btn btn-sm" onclick="offClear()">Xóa lọc</button>
     </div>
     <div class="tw"><table>
       <thead><tr><th class="wide">Nhân viên</th><th>Đăng ký</th><th class="wide">Ngày xin nghỉ</th>
