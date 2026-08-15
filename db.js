@@ -114,6 +114,11 @@ CREATE TABLE IF NOT EXISTS off_locks (
   const cols = db.prepare('PRAGMA table_info(users)').all().map((c) => c.name);
   if (!cols.includes('shift_start')) db.exec("ALTER TABLE users ADD COLUMN shift_start TEXT NOT NULL DEFAULT '09:00'");
   if (!cols.includes('shift_end'))   db.exec("ALTER TABLE users ADD COLUMN shift_end   TEXT NOT NULL DEFAULT '18:00'");
+
+  const oc = db.prepare('PRAGMA table_info(day_offs)').all().map((c) => c.name);
+  if (!oc.includes('brand'))      db.exec('ALTER TABLE day_offs ADD COLUMN brand TEXT');
+  if (!oc.includes('department')) db.exec('ALTER TABLE day_offs ADD COLUMN department TEXT');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_off_slot ON day_offs(brand, department, day)');
 }
 
 /* ============================================================
@@ -364,6 +369,8 @@ const LATE_LEVELS = {
   out60: { label: 'Trễ xuống ca ~60p', kind: 'out', min: 60 },
 };
 const MAX_OFF_PER_MONTH = Math.max(1, Number(process.env.MAX_OFF_PER_MONTH) || 15);
+// Cùng một ngày, mỗi bộ phận (theo cặp brand + bộ phận) cho tối đa bấy nhiêu người nghỉ.
+const MAX_OFF_PER_DAY_DEPT = Math.max(1, Number(process.env.MAX_OFF_PER_DAY_DEPT) || 1);
 
 /* Mốc giờ theo lịch của một lần chấm, tính từ giờ ca của nhân viên.
    Ca qua đêm (vd 22:00–06:00) thì giờ xuống ca rơi sang ngày hôm sau. */
@@ -486,10 +493,37 @@ function punchHistory(f = {}, viewer = null) {
 const ymOf = (day) => String(day).slice(0, 7);
 const isLocked = (ym) => !!db.prepare('SELECT 1 FROM off_locks WHERE ym=?').get(ym);
 
+/* Những ai trong cùng bộ phận đã nhận ngày đó */
+function whoOff(brand, dept, day, exceptUserId = null) {
+  return db.prepare(
+    `SELECT u.id, u.name FROM day_offs d JOIN users u ON u.id=d.user_id
+     WHERE d.day=? AND IFNULL(u.brand,'-')=? AND IFNULL(u.department,'-')=?
+       AND u.is_active=1 AND u.role='staff' AND (? IS NULL OR u.id<>?)`
+  ).all(day, brand || '-', dept || '-', exceptUserId, exceptUserId);
+}
+
 function myOffs(user, ym) {
   const days = db.prepare('SELECT day FROM day_offs WHERE user_id=? AND day LIKE ? ORDER BY day')
     .all(user.id, ym + '%').map((r) => r.day);
-  return { ym, days, used: days.length, max: MAX_OFF_PER_MONTH, locked: isLocked(ym) };
+
+  // Ngày đã đủ người nghỉ trong bộ phận -> làm mờ trên lịch thay vì để bấm rồi báo lỗi
+  const rows = db.prepare(
+    `SELECT d.day, u.name, COUNT(*) OVER (PARTITION BY d.day) n
+     FROM day_offs d JOIN users u ON u.id=d.user_id
+     WHERE d.day LIKE ? AND IFNULL(u.brand,'-')=? AND IFNULL(u.department,'-')=?
+       AND u.is_active=1 AND u.role='staff' AND u.id<>?`
+  ).all(ym + '%', user.brand || '-', user.department || '-', user.id);
+
+  const byDay = {};
+  rows.forEach((r) => { (byDay[r.day] = byDay[r.day] || []).push(r.name); });
+  const taken = Object.entries(byDay)
+    .filter(([, names]) => names.length >= MAX_OFF_PER_DAY_DEPT)
+    .map(([day, names]) => ({ day, names }));
+
+  return {
+    ym, days, used: days.length, max: MAX_OFF_PER_MONTH,
+    locked: isLocked(ym), taken, per_day: MAX_OFF_PER_DAY_DEPT,
+  };
 }
 
 function toggleOff(user, day, byAdmin = false) {
@@ -512,7 +546,20 @@ function toggleOff(user, day, byAdmin = false) {
     return { ok: false, message: `Tháng này đã đủ ${MAX_OFF_PER_MONTH} ngày. Bỏ bớt ngày khác rồi chọn lại.` };
   }
 
-  db.prepare('INSERT INTO day_offs (user_id,day,created_at) VALUES (?,?,?)').run(user.id, day, now());
+  // Trùng ngày trong cùng bộ phận. Node chạy một luồng và better-sqlite3 chạy đồng bộ,
+  // nên đoạn đếm rồi ghi này không bị chen ngang giữa chừng.
+  const others = whoOff(user.brand, user.department, day, user.id);
+  if (others.length >= MAX_OFF_PER_DAY_DEPT && !byAdmin) {
+    return {
+      ok: false,
+      message: MAX_OFF_PER_DAY_DEPT === 1
+        ? `${others[0].name} đã nhận nghỉ ngày ${dm}. Mỗi bộ phận chỉ 1 người nghỉ mỗi ngày.`
+        : `Ngày ${dm} đã đủ ${MAX_OFF_PER_DAY_DEPT} người nghỉ (${others.map((o) => o.name).join(', ')}).`,
+    };
+  }
+
+  db.prepare('INSERT INTO day_offs (user_id,day,brand,department,created_at) VALUES (?,?,?,?,?)')
+    .run(user.id, day, user.brand, user.department, now());
   return { ok: true, message: `Đã đăng ký nghỉ ${dm}.`, off: myOffs(user, ym) };
 }
 
@@ -571,5 +618,5 @@ module.exports = {
   startActivity, stopActivity, stateFor, history, allUsers, audit, lockKey,
   PUNCH_KINDS, LATE_LEVELS, MAX_OFF_PER_MONTH,
   punch, shiftToday, punchHistory, scheduledFor,
-  myOffs, toggleOff, offSummary, setLock, isLocked,
+  myOffs, toggleOff, offSummary, setLock, isLocked, whoOff, MAX_OFF_PER_DAY_DEPT,
 };
