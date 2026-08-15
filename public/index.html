@@ -25,7 +25,11 @@
 const $ = s => document.querySelector(s);
 const pad = n => String(n).padStart(2, '0');
 const clk = s => (s < 0 ? '-' : '') + pad(Math.floor(Math.abs(s) / 60)) + ':' + pad(Math.abs(s) % 60);
-const hhmm = t => pad(new Date(t).getHours()) + ':' + pad(new Date(t).getMinutes());
+let TZ = null;   // múi giờ khu vực của nhân viên, server gửi xuống
+const fmtTz = (t, o) => new Intl.DateTimeFormat('en-GB',
+  { timeZone: TZ || undefined, hour12: false, ...o }).format(new Date(t));
+const hhmm = t => TZ ? fmtTz(t, { hour: '2-digit', minute: '2-digit' })
+                     : pad(new Date(t).getHours()) + ':' + pad(new Date(t).getMinutes());
 const DOW = ['Chủ Nhật','Thứ Hai','Thứ Ba','Thứ Tư','Thứ Năm','Thứ Sáu','Thứ Bảy'];
 const DOW_S = ['CN','T2','T3','T4','T5','T6','T7'];
 
@@ -74,6 +78,7 @@ async function load() {
   const d = await r.json();
   skew = d.server_time - Date.now();
   S = d;
+  TZ = d.shift && d.shift.timezone ? d.shift.timezone : null;
   if (!offYm) offYm = d.offs.ym;
   $('#gate').hidden = true; $('#app').hidden = false;
   render();
@@ -115,17 +120,35 @@ async function moveMonth(delta) {
 }
 
 /* ---------- Vẽ ---------- */
+function clockParts() {
+  const t = nowMs();
+  if (!TZ) { const d = new Date(t); return [pad(d.getHours()), pad(d.getMinutes()), pad(d.getSeconds())]; }
+  return fmtTz(t, { hour: '2-digit', minute: '2-digit', second: '2-digit' }).split(':');
+}
+function dateLine() {
+  const t = nowMs();
+  if (!TZ) { const d = new Date(t);
+    return `${DOW[d.getDay()]}, ${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()}`; }
+  const p = new Intl.DateTimeFormat('en-GB', { timeZone: TZ, weekday: 'short',
+    day: '2-digit', month: '2-digit', year: 'numeric' }).formatToParts(new Date(t));
+  const g = k => (p.find(x => x.type === k) || {}).value;
+  const wd = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 }[g('weekday')] ?? 0;
+  return `${DOW[wd]}, ${g('day')}/${g('month')}/${g('year')}`;
+}
+
 function heroCard(d, mine, left, over) {
   return `<div class="card hero ${mine ? 'run' : ''} ${over ? 'over' : ''}" id="hero">
     <div class="lb">${mine ? mine.type_name : 'Thời gian hiện tại'}</div>
     <div class="big" id="big">${mine ? clk(left)
-      : `${pad(d.getHours())}<span class="s">:</span>${pad(d.getMinutes())}<span class="s">:</span>${pad(d.getSeconds())}`}</div>
+      : (() => { const c = clockParts();
+          return `${c[0]}<span class="s">:</span>${c[1]}<span class="s">:</span>${c[2]}`; })()}</div>
     <div class="sub" id="heroSub">${mine
       ? `Bắt đầu ${hhmm(mine.started_at)} · cho phép ${mine.limit_minutes} phút`
-      : `${DOW[d.getDay()]}, ${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()}`}</div>
+      : dateLine()}</div>
     ${mine ? `<div class="bar-track"><i id="trk" style="width:${pctOf(mine)}%"></i></div>` : `
       <div class="tags"><span class="pill">${S.me.department || '—'}</span>
-        ${S.me.brand ? `<span class="pill pri">${S.me.brand}</span>` : ''}</div>`}
+        ${S.me.brand ? `<span class="pill pri">${S.me.brand}</span>` : ''}
+        ${S.shift && S.shift.location ? `<span class="pill">${S.shift.location}</span>` : ''}</div>`}
   </div>`;
 }
 
@@ -136,11 +159,13 @@ function shiftCard() {
     ? `<span class="pill pri"><span class="dot"></span>Đang trong ca từ ${hhmm(sh.checked_in_at)}</span>`
     : (sh.checked_out_at
         ? `<span class="pill">Đã xuống ca lúc ${hhmm(sh.checked_out_at)}</span>`
-        : `<span class="pill">Chưa lên ca</span>`);
+        : (sh.has_shift ? `<span class="pill">Chưa lên ca</span>`
+                        : `<span class="pill">Hôm nay không có ca — bấm vẫn ghi nhận, không tính trễ</span>`));
 
   return `<div class="card">
     <div class="card-h"><span class="t">Ca hôm nay</span>
-      <span class="r">${sh.shift_start}–${sh.shift_end}</span></div>
+      <span class="r">${sh.has_shift ? `${sh.shift_start}–${sh.shift_end} · giờ ${sh.location}`
+        : 'hôm nay nghỉ'}</span></div>
     <div style="padding:14px 18px 4px">${state}</div>
     <div class="punch">
       <button class="pbtn ${sh.on_shift ? '' : 'go'}" onclick="punch('in')">
@@ -185,23 +210,41 @@ function offCard() {
   const takenBy = {};
   (o.taken || []).forEach(t => { takenBy[t.day] = t.names.join(', '); });
 
+  const workSet = new Set(o.work_days || []);
+
   let cells = '';
   for (let i = 0; i < lead; i++) cells += '<div class="od blank"></div>';
   for (let d = 1; d <= dim; d++) {
     const day = `${o.ym}-${pad(d)}`;
-    const on = o.days.includes(day);
+    const on = o.days.includes(day);                       // mình đã đăng ký
+    const hasShift = workSet.has(day);                     // lịch chính thức có xếp ca
     const isToday = isThis && today.getDate() === d;
     const busy = !on && takenBy[day];
     const full = o.used >= o.max && !on;
     const dis = o.locked || full || !!busy;
-    cells += `<button class="od ${on ? 'on' : ''} ${busy ? 'busy' : ''} ${isToday ? 'today' : ''}"
-      ${dis ? 'disabled' : ''} ${busy ? `title="${takenBy[day]} đã nhận ngày này"` : ''}
+
+    // 4 trạng thái: đăng ký & được duyệt / đăng ký nhưng vẫn phải làm /
+    // lịch cho nghỉ mà mình không xin / còn trống
+    let cls = '', tip = '';
+    if (on && o.has_schedule && hasShift) { cls = 'on rejected'; tip = 'Bạn xin nghỉ nhưng lịch vẫn xếp ca'; }
+    else if (on) { cls = 'on'; tip = o.has_schedule ? 'Đã được duyệt nghỉ' : 'Đã đăng ký, chờ xếp lịch'; }
+    else if (o.has_schedule && !hasShift) { cls = 'rosteroff'; tip = 'Lịch cho nghỉ (bạn không đăng ký)'; }
+    else if (busy) { cls = 'busy'; tip = `${takenBy[day]} đã nhận ngày này`; }
+
+    cells += `<button class="od ${cls} ${isToday ? 'today' : ''}"
+      ${dis ? 'disabled' : ''} ${tip ? `title="${tip}"` : ''}
       onclick="toggleOff('${day}')">${d}</button>`;
   }
 
   return `<div class="card">
-    <div class="card-h"><span class="t">Lịch off</span>
+    <div class="card-h"><span class="t">${o.has_schedule ? 'Lịch nghỉ' : 'Đăng ký nghỉ'}</span>
       <span class="r">${o.locked ? '🔒 tháng đã khóa' : `đã chọn ${o.used}/${o.max} ngày`}</span></div>
+    ${o.has_schedule ? `<div class="offnote">
+      Lịch tháng này đã xếp xong. Bạn đăng ký ${o.used} ngày, được duyệt <b>${o.approved}</b> ngày${
+        o.rejected ? `, còn <b style="color:var(--red)">${o.rejected}</b> ngày vẫn phải làm` : ''}.
+      </div>` : `<div class="offnote">
+      Lịch tháng này chưa xếp. Đăng ký sớm để quản lý xếp ca theo nguyện vọng.
+      </div>`}
     <div class="offnav">
       <button class="btn btn-sm" onclick="moveMonth(-1)">‹</button>
       <b>Tháng ${m}/${y}</b>
@@ -210,8 +253,10 @@ function offCard() {
     <div class="odow">${DOW_S.map(d => `<span>${d}</span>`).join('')}</div>
     <div class="ogrid">${cells}</div>
     <div class="offlegend">
-      <span><i class="sw on"></i>Bạn nghỉ</span>
-      <span><i class="sw busy"></i>Đồng nghiệp đã nhận</span>
+      <span><i class="sw on"></i>${o.has_schedule ? 'Được duyệt' : 'Đã đăng ký'}</span>
+      ${o.has_schedule ? '<span><i class="sw rejected"></i>Vẫn phải làm</span>' : ''}
+      ${o.has_schedule ? '<span><i class="sw rosteroff"></i>Lịch cho nghỉ</span>' : ''}
+      <span><i class="sw busy"></i>Người khác đã nhận</span>
       <span><i class="sw"></i>Còn trống</span>
     </div>
     <div class="hint" style="margin:8px 0 16px">${o.locked
@@ -278,8 +323,8 @@ function tick() {
       const sub = $('#heroSub');
       if (sub && l < 0) sub.textContent = `Bắt đầu ${hhmm(mine.started_at)} · đã quá ${Math.floor(-l / 60)} phút`;
     } else {
-      const d = new Date(nowMs());
-      big.innerHTML = `${pad(d.getHours())}<span class="s">:</span>${pad(d.getMinutes())}<span class="s">:</span>${pad(d.getSeconds())}`;
+      const c = clockParts();
+      big.innerHTML = `${c[0]}<span class="s">:</span>${c[1]}<span class="s">:</span>${c[2]}`;
     }
   }
   document.querySelectorAll('[data-cd]').forEach(el => {
