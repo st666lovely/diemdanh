@@ -57,6 +57,32 @@ function requireUser(req, res, next) {
   next();
 }
 
+/* Chốt thiết bị: chạy trước mọi thao tác ghi của nhân viên.
+   Chưa gắn -> gắn thiết bị hiện tại. Đã gắn máy khác -> chặn. */
+function requireDevice(req, res, next) {
+  const u = req.user;
+  if (u.role === 'admin') return next();
+
+  if (!req.session.did) req.session.did = crypto.randomUUID();
+  const did = req.session.did;
+
+  if (!u.device_id) {
+    D.db.prepare('UPDATE users SET device_id=?, device_seen_at=?, device_ua=? WHERE id=?')
+      .run(did, Date.now(), (req.get('user-agent') || '').slice(0, 400), u.id);
+    D.audit(u, 'device_bind', null, req.ip);
+    return next();
+  }
+
+  if (u.device_id !== did) {
+    D.audit(u, 'device_mismatch', (req.get('user-agent') || '').slice(0, 200), req.ip);
+    return res.status(403).json({
+      ok: false, device_mismatch: true,
+      message: 'Link này đã gắn với thiết bị khác. Nếu bạn vừa đổi máy hoặc vừa cài app lên màn hình chính, nhờ quản lý bấm "Gỡ máy" giúp.',
+    });
+  }
+  next();
+}
+
 function requireAdmin(req, res, next) {
   if (req.user.role !== 'admin') {
     return res.status(403).json({ ok: false, message: 'Chỉ quản trị xem được mục này.' });
@@ -64,7 +90,11 @@ function requireAdmin(req, res, next) {
   next();
 }
 
-/* --- Vào ca bằng link --- */
+/* --- Vào ca bằng link ---
+   Phục vụ thẳng trang thay vì chuyển hướng về "/", để URL trên thanh địa chỉ giữ nguyên
+   /k/<key>. Nhờ vậy nhân viên "Thêm vào màn hình chính" thì icon trỏ đúng link của họ.
+   Quan trọng với iPhone: app cài ra màn hình chính dùng kho cookie RIÊNG với Safari,
+   nếu icon chỉ trỏ về "/" thì mở lên sẽ không có phiên và bị chặn. */
 app.get('/k/:key', (req, res) => {
   const key = String(req.params.key || '').toUpperCase();
   const u = D.db.prepare('SELECT * FROM users WHERE key=? AND is_active=1').get(key);
@@ -74,23 +104,28 @@ app.get('/k/:key', (req, res) => {
     return res.redirect('/?e=nokey');
   }
 
-  // Mỗi trình duyệt có một device_id riêng, sinh lần đầu và giữ trong cookie.
   if (!req.session.did) req.session.did = crypto.randomUUID();
-  const did = req.session.did;
-
-  if (!u.device_id) {
-    // Lần đầu: gắn key với thiết bị này.
-    D.db.prepare('UPDATE users SET device_id=?, device_seen_at=?, device_ua=? WHERE id=?')
-      .run(did, Date.now(), (req.get('user-agent') || '').slice(0, 400), u.id);
-    D.audit(u, 'device_bind', null, req.ip);
-  } else if (u.device_id !== did) {
-    // Key bị mở ở máy khác — chặn và ghi lại. Đây là chỗ bắt việc bấm hộ nhau.
-    D.audit(u, 'device_mismatch', (req.get('user-agent') || '').slice(0, 200), req.ip);
-    return res.redirect('/?e=device');
-  }
-
   req.session.uid = u.id;
-  res.redirect('/');
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+/* Manifest động: khi mở qua /k/<key>, start_url trỏ về đúng link đó.
+   Nếu để start_url = "/" thì icon trên màn hình chính mở ra là mất phiên. */
+app.get('/manifest.webmanifest', (req, res) => {
+  const k = String(req.query.k || '').toUpperCase();
+  const valid = k && D.db.prepare('SELECT 1 FROM users WHERE key=? AND is_active=1').get(k);
+  res.type('application/manifest+json').json({
+    name: 'Trạm trực', short_name: 'Trạm trực',
+    description: 'Chấm công ca và quản lý rời vị trí',
+    start_url: valid ? `/k/${k}` : '/',
+    scope: '/', display: 'standalone', orientation: 'portrait',
+    background_color: '#F1F3F2', theme_color: '#0F6E52', lang: 'vi',
+    icons: [
+      { src: '/icon-192.png', sizes: '192x192', type: 'image/png' },
+      { src: '/icon-512.png', sizes: '512x512', type: 'image/png' },
+      { src: '/icon-maskable-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
+    ],
+  });
 });
 
 /* --- Đăng nhập quản trị --- */
@@ -131,15 +166,20 @@ app.get('/api/state', requireUser, (req, res) => {
     shift: D.shiftToday(req.user),
     offs: D.myOffs(req.user, ym),
     schedule: D.scheduleOf(req.user.id, ym),
+    device: {
+      bound: !!req.user.device_id,
+      is_this: req.user.device_id ? req.user.device_id === req.session.did : null,
+    },
+    key: req.user.role === 'staff' ? req.user.key : null,
   });
 });
 
-app.post('/api/start', requireUser, (req, res) => {
+app.post('/api/start', requireUser, requireDevice, (req, res) => {
   const r = D.startActivity(req.user, String((req.body || {}).code || ''), req.ip, req.get('user-agent'));
   res.status(r.ok ? 200 : 409).json({ ...r, state: D.stateFor(req.user) });
 });
 
-app.post('/api/stop', requireUser, (req, res) => {
+app.post('/api/stop', requireUser, requireDevice, (req, res) => {
   const r = D.stopActivity(req.user, 'staff');
   res.status(r.ok ? 200 : 409).json({ ...r, state: D.stateFor(req.user) });
 });
@@ -288,7 +328,7 @@ app.delete('/api/admin/users/:id', requireUser, requireAdmin, (req, res) => {
    ============================================================ */
 
 /* --- Nhân viên bấm Lên ca / Xuống ca / Chấm công --- */
-app.post('/api/punch', requireUser, (req, res) => {
+app.post('/api/punch', requireUser, requireDevice, (req, res) => {
   const r = D.punch(req.user, String((req.body || {}).kind || ''), req.ip, req.get('user-agent'));
   res.status(r.ok ? 200 : 400).json({ ...r, shift: D.shiftToday(req.user) });
 });
@@ -350,14 +390,18 @@ app.get('/api/offs', requireUser, (req, res) => {
   res.json(D.myOffs(req.user, String(req.query.ym || thisYm())));
 });
 
-app.post('/api/offs/toggle', requireUser, (req, res) => {
+app.post('/api/offs/toggle', requireUser, requireDevice, (req, res) => {
   const r = D.toggleOff(req.user, String((req.body || {}).day || ''));
   res.status(r.ok ? 200 : 400).json(r);
 });
 
 /* --- Lịch off toàn team, chỉ quản trị --- */
 app.get('/api/admin/offs', requireUser, requireAdmin, (req, res) => {
-  res.json(D.offSummary(String(req.query.ym || thisYm()), String(req.query.filter || '')));
+  res.json({
+    ...D.offSummary(String(req.query.ym || thisYm()), req.query),
+    departments: D.DEPTS, brands: D.BRANDS,
+    users: D.allUsers().filter((u) => u.role === 'staff'),
+  });
 });
 
 /* Quản trị chỉnh hộ nhân viên — bỏ qua hạn mức và khóa tháng */
