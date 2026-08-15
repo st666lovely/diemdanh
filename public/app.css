@@ -142,6 +142,35 @@ button:focus-visible,a:focus-visible{outline:2px solid var(--pri);outline-offset
 }
 
 /* Tóm tắt hôm nay */
+/* ===== Chấm công ca: Lên ca / Xuống ca / Chấm công ===== */
+.punch{display:grid;grid-template-columns:repeat(3,1fr);gap:9px;padding:12px 14px 14px}
+.pbtn{padding:14px 8px;border-radius:12px;border:1.5px solid var(--line);background:#fff;
+  font-weight:700;font-size:14.5px;transition:background .15s,border-color .15s;min-height:72px;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px}
+.pbtn .k{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--tx3);font-weight:700}
+.pbtn:hover{background:#F7F9F8;border-color:var(--line2)}
+.pbtn:active{transform:scale(.985)}
+/* Nút nên bấm tiếp theo được tô đậm — chưa lên ca thì "Lên ca", đang trong ca thì "Xuống ca" */
+.pbtn.go{background:var(--pri);border-color:var(--pri);color:#fff}
+.pbtn.go .k{color:rgba(255,255,255,.72)}
+.pbtn.go:hover{background:var(--pri-h)}
+
+/* ===== Lịch off ===== */
+.offnav{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:14px 18px 8px}
+.offnav b{font-size:15px;font-weight:700}
+.odow{display:grid;grid-template-columns:repeat(7,1fr);gap:5px;padding:0 14px}
+.odow span{text-align:center;font-size:11px;font-weight:700;color:var(--tx3)}
+.ogrid{display:grid;grid-template-columns:repeat(7,1fr);gap:5px;padding:6px 14px 0}
+.od{aspect-ratio:1;border-radius:10px;border:1.5px solid transparent;background:#F4F6F5;
+  color:var(--ink);font-size:14px;font-weight:600;transition:background .15s;min-height:38px}
+.od:hover:not(:disabled){background:#E9EDEB}
+.od.blank{visibility:hidden}
+.od.on{background:var(--pri);color:#fff;border-color:var(--pri)}
+/* Hạn mức có thể lên tới 15 ngày nên ô đã chọn cần nổi rõ khi nhìn lướt */
+.od.on{box-shadow:inset 0 0 0 1px rgba(255,255,255,.25)}
+.od.today{border-color:var(--amb)}
+.od:disabled{opacity:.35;cursor:not-allowed}
+
 .sum{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--line)}
 .sum div{background:#fff;padding:15px 12px;text-align:center}
 .sum .n{font-size:22px;font-weight:700;letter-spacing:-.02em}
@@ -234,6 +263,22 @@ td.wide,th.wide{width:100%;white-space:normal}
 .row{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end}
 .row .f{display:flex;flex-direction:column;gap:6px;flex:1;min-width:150px}
 .row .f label{font-size:11.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--tx3)}
+
+/* ===== Chip lọc lịch off ===== */
+.chips{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:16px}
+.chip{padding:8px 14px;border-radius:999px;font-size:13.5px;font-weight:600;color:var(--tx2);
+  background:#fff;border:1.5px solid var(--line);transition:background .15s,border-color .15s}
+.chip b{font-weight:800;margin-left:3px}
+.chip:hover{background:#F7F9F8;border-color:var(--line2)}
+.chip.on{background:var(--pri);border-color:var(--pri);color:#fff}
+
+/* Nhãn ngày nghỉ, bấm để bỏ */
+.daytag{display:inline-flex;align-items:center;gap:5px;padding:4px 8px 4px 11px;margin:2px 4px 2px 0;
+  border-radius:8px;background:var(--pri-s);border:1px solid #CFE5DD;color:var(--pri);
+  font-size:13px;font-weight:700;transition:background .15s}
+.daytag span{opacity:.5;font-weight:400}
+.daytag:hover{background:#DCEBE5}
+.daytag:hover span{opacity:1;color:var(--red)}
 
 /* ===== Toast ===== */
 .toast{position:fixed;left:50%;bottom:20px;transform:translateX(-50%);z-index:200;
