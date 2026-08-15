@@ -15,14 +15,22 @@ const PORT = process.env.PORT || 3000;
 app.set('trust proxy', true);
 
 app.use(express.json());
-app.use(cookieSession({
+// Cờ "secure" phải bám theo giao thức THẬT của từng request.
+// Render kết thúc TLS ở proxy rồi chuyển tiếp bằng HTTP, nên nếu đặt cứng
+// secure=true theo NODE_ENV thì cookie bị bỏ im lặng: đăng nhập trả về ok
+// nhưng không có cookie, request sau bị 401, trang đứng yên ở màn đăng nhập.
+// Nhờ 'trust proxy' bật ở trên, req.secure đọc được X-Forwarded-Proto.
+const sessionOpts = {
   name: 'tt',
   keys: [process.env.SESSION_SECRET || 'doi-chuoi-nay-trong-bien-moi-truong'],
-  maxAge: 365 * 24 * 3600 * 1000,   // nhân viên không phải vào lại link mỗi ngày
+  maxAge: 365 * 24 * 3600 * 1000,   // nhân viên không phải mở lại link mỗi ngày
   httpOnly: true,
   sameSite: 'lax',
-  secure: process.env.NODE_ENV === 'production',
-}));
+};
+const sessionSecure = cookieSession({ ...sessionOpts, secure: true });
+const sessionPlain  = cookieSession({ ...sessionOpts, secure: false });
+app.use((req, res, next) =>
+  (req.secure ? sessionSecure : sessionPlain)(req, res, next));
 
 /* ============================================================
    PHIÊN
