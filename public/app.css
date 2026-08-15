@@ -20,6 +20,10 @@
   --sh:0 1px 2px rgba(16,22,20,.05), 0 4px 14px rgba(16,22,20,.04);
 }
 *{box-sizing:border-box;margin:0;padding:0}
+/* Thuộc tính hidden của HTML phải thắng mọi quy tắc display của CSS.
+   Thiếu dòng này thì .gate{display:flex} đè lên [hidden], khiến khung
+   đăng nhập vẫn hiện sau khi đã đăng nhập xong và che mất nội dung bên dưới. */
+[hidden]{display:none!important}
 html{-webkit-text-size-adjust:100%}
 body{
   background:var(--bg);color:var(--ink);
