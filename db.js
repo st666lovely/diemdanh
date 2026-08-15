@@ -1,663 +1,803 @@
-<!DOCTYPE html>
-<html lang="vi">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Quản trị · Trạm trực</title>
-<meta name="theme-color" content="#F1F3F2">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/app.css">
-</head>
-<body>
+'use strict';
 
-<div class="toast hide" id="toast"><span class="b"></span>
-  <div><div class="tt" id="tt"></div><div class="ts" id="ts"></div></div></div>
+const path = require('path');
+const fs = require('fs');
+const crypto = require('crypto');
+const Database = require('better-sqlite3');
+const bcrypt = require('bcryptjs');
 
-<!-- Đăng nhập: chỉ quản trị mới cần -->
-<div class="gate" id="gate" hidden>
-  <div class="card">
-    <h1>Quản trị</h1>
-    <p>Nhân viên không cần đăng nhập — họ vào bằng link riêng.</p>
-    <form id="lf">
-      <label>Tài khoản<input name="username" autocapitalize="off" autocomplete="username" required></label>
-      <label>Mật khẩu<input name="password" type="password" autocomplete="current-password" required></label>
-      <button class="btn btn-pri btn-block" type="submit" id="lb">Đăng nhập</button>
-      <div class="err" id="le"></div>
-    </form>
-  </div>
-</div>
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
+fs.mkdirSync(DATA_DIR, { recursive: true });
 
-<div id="app" hidden>
-  <div class="top">
-    <span class="lg">Trạm trực</span>
-    <span class="sp"></span>
-    <a class="mini" href="/">Trang nhân viên</a>
-    <button class="mini" id="pw">Đổi mật khẩu</button>
-    <button class="mini" id="out">Thoát</button>
-  </div>
-  <div class="adm">
-    <div class="head">
-      <div><h1>Hoạt động</h1><p>Rời vị trí trong ca · mỗi bộ phận 1 người cùng lúc</p></div>
-      <div class="sp"><button class="btn btn-sm" id="exp">Xuất Excel</button></div>
-    </div>
-    <div class="tabs">
-      <button id="tb" class="on">Theo dõi</button>
-      <button id="tp">Chấm công</button>
-      <button id="tl">Trễ</button>
-      <button id="to">Lịch off</button>
-      <button id="tu">Nhân sự</button>
-    </div>
-    <div id="pb"></div>
-    <div id="pp" hidden></div>
-    <div id="pl" hidden></div>
-    <div id="po" hidden></div>
-    <div id="pu" hidden></div>
-  </div>
-</div>
+const db = new Database(path.join(DATA_DIR, 'tramtruc.db'));
+db.pragma('journal_mode = WAL');
+db.pragma('foreign_keys = ON');
 
-<script>
-const $ = s => document.querySelector(s);
-const pad = n => String(n).padStart(2, '0');
-const clk = s => (s < 0 ? '-' : '') + pad(Math.floor(Math.abs(s) / 60)) + ':' + pad(Math.abs(s) % 60);
-const dmy = t => pad(new Date(t).getDate()) + '/' + pad(new Date(t).getMonth() + 1) + '/' + new Date(t).getFullYear();
-const hms = t => t ? pad(new Date(t).getHours()) + ':' + pad(new Date(t).getMinutes()) + ':' + pad(new Date(t).getSeconds()) : '—';
-const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const DEPTS = ['CS', 'CS ONL', 'VIP', 'RISK', 'RISK ONL'];
+const BRANDS = ['AE', 'ST'];
+const AUTO_CLOSE_GRACE_MIN = 30;
 
-let B = null, skew = 0, TAB = 'b';
-const nowMs = () => Date.now() + skew;
-const leftOf = h => Math.round((h.started_at + h.limit_minutes * 60000 - nowMs()) / 1000);
-const pctOf  = h => Math.min(100, ((nowMs() - h.started_at) / (h.limit_minutes * 60000)) * 100);
+/* ============================================================
+   SCHEMA
+   Nhân viên KHÔNG có mật khẩu — vào bằng link chứa key định danh.
+   Chỉ quản trị mới có password_hash.
+   ============================================================ */
+db.exec(`
+CREATE TABLE IF NOT EXISTS users (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  name           TEXT    NOT NULL,
+  key            TEXT    NOT NULL UNIQUE,   -- link vào ca: /k/<key>
+  department     TEXT,
+  brand          TEXT,
+  role           TEXT    NOT NULL DEFAULT 'staff',   -- staff | admin
+  password_hash  TEXT,                      -- chỉ admin
+  username       TEXT UNIQUE,               -- chỉ admin
+  device_id      TEXT,                      -- gắn với thiết bị đầu tiên mở link
+  device_seen_at INTEGER,
+  device_ua      TEXT,
+  is_active      INTEGER NOT NULL DEFAULT 1,
+  created_at     INTEGER NOT NULL
+);
 
-function toast(t, s, ok) {
-  const el = $('#toast');
-  el.classList.toggle('err', !ok); el.classList.remove('hide');
-  $('#tt').textContent = t; $('#ts').textContent = s || '';
-  clearTimeout(toast._t); toast._t = setTimeout(() => el.classList.add('hide'), 4200);
+CREATE TABLE IF NOT EXISTS activity_types (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  limit_minutes INTEGER NOT NULL,
+  counts_toward_limit INTEGER NOT NULL DEFAULT 1,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  is_active INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS activities (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  type_code     TEXT    NOT NULL,
+  brand         TEXT,
+  department    TEXT,
+  limit_minutes INTEGER NOT NULL,
+  started_at    INTEGER NOT NULL,
+  ended_at      INTEGER,
+  duration_sec  INTEGER,
+  is_over_limit INTEGER NOT NULL DEFAULT 0,
+  closed_by     TEXT,
+  -- Chốt chặn khóa bộ phận: "AE|CS" khi ca đang mở và loại chiếm khóa, NULL khi đóng.
+  -- SQLite coi các NULL là khác nhau trong UNIQUE nên nhiều bản ghi đã đóng cùng tồn tại,
+  -- còn mỗi cặp brand+bộ phận chỉ có đúng 1 ca đang mở. Hai người bấm lệch 10ms không lọt.
+  lock_key      TEXT UNIQUE,
+  ip            TEXT,
+  user_agent    TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_act_user ON activities(user_id, started_at);
+CREATE INDEX IF NOT EXISTS idx_act_dep  ON activities(brand, department, started_at);
+CREATE INDEX IF NOT EXISTS idx_act_open ON activities(ended_at);
+
+CREATE TABLE IF NOT EXISTS audit_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  actor_id INTEGER, actor_name TEXT,
+  action TEXT NOT NULL, detail TEXT, ip TEXT, at INTEGER NOT NULL
+);
+
+-- Chấm công ca: lên ca / xuống ca / chấm công lẻ
+CREATE TABLE IF NOT EXISTS punches (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  kind         TEXT    NOT NULL,          -- in | out | log
+  brand        TEXT, department TEXT,
+  scheduled_at INTEGER,                   -- NULL với loại 'log'
+  actual_at    INTEGER NOT NULL,
+  late_minutes INTEGER NOT NULL DEFAULT 0,
+  late_level   TEXT,                      -- in5 | in30 | out60
+  ip TEXT, user_agent TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_p_user ON punches(user_id, actual_at);
+CREATE INDEX IF NOT EXISTS idx_p_late ON punches(late_level, actual_at);
+
+-- Lịch off: mỗi dòng là một ngày nghỉ đã đăng ký
+CREATE TABLE IF NOT EXISTS day_offs (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  day        TEXT    NOT NULL,            -- YYYY-MM-DD
+  created_at INTEGER NOT NULL,
+  UNIQUE(user_id, day)
+);
+
+-- Quản trị khóa tháng để nhân viên không sửa được nữa
+CREATE TABLE IF NOT EXISTS off_locks (
+  ym        TEXT PRIMARY KEY,             -- YYYY-MM
+  locked_at INTEGER NOT NULL
+);
+
+-- Lịch ca theo TỪNG NGÀY, nhập từ file Excel/CSV tháng.
+-- Không có dòng cho ngày nào = ngày đó nghỉ, không tính trễ.
+CREATE TABLE IF NOT EXISTS shift_days (
+  user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  day        TEXT    NOT NULL,            -- YYYY-MM-DD
+  start_hm   TEXT    NOT NULL,            -- HH:MM giờ địa phương của nhân viên
+  end_hm     TEXT    NOT NULL,
+  PRIMARY KEY (user_id, day)
+);
+CREATE INDEX IF NOT EXISTS idx_shift_day ON shift_days(day);
+`);
+
+// Cột giờ ca — thêm sau nên dùng ALTER có kiểm tra, tránh lỗi khi chạy lại
+{
+  const cols = db.prepare('PRAGMA table_info(users)').all().map((c) => c.name);
+  if (!cols.includes('shift_start')) db.exec("ALTER TABLE users ADD COLUMN shift_start TEXT NOT NULL DEFAULT '09:00'");
+  if (!cols.includes('shift_end'))   db.exec("ALTER TABLE users ADD COLUMN shift_end   TEXT NOT NULL DEFAULT '18:00'");
+
+  if (!cols.includes('location')) db.exec("ALTER TABLE users ADD COLUMN location TEXT NOT NULL DEFAULT 'VN'");
+
+  const oc = db.prepare('PRAGMA table_info(day_offs)').all().map((c) => c.name);
+  if (!oc.includes('brand'))      db.exec('ALTER TABLE day_offs ADD COLUMN brand TEXT');
+  if (!oc.includes('department')) db.exec('ALTER TABLE day_offs ADD COLUMN department TEXT');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_off_slot ON day_offs(brand, department, day)');
 }
 
-async function api(url, opts) {
-  const r = await fetch(url, {
-    headers: { 'Content-Type': 'application/json' }, ...opts,
-    body: opts && opts.body ? JSON.stringify(opts.body) : undefined,
-  });
-  return { status: r.status, ...(await r.json().catch(() => ({}))) };
+/* ============================================================
+   SEED
+   ============================================================ */
+const ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ'; // bỏ 0 1 I O cho dễ đọc/đọc qua điện thoại
+function newKey(len = 8) {
+  const b = crypto.randomBytes(len);
+  let s = '';
+  for (let i = 0; i < len; i++) s += ALPHABET[b[i] % ALPHABET.length];
+  return s;
 }
 
-/* ---------- Đăng nhập ---------- */
-$('#lf').addEventListener('submit', async e => {
-  e.preventDefault();
-  const f = new FormData(e.target);
-  $('#lb').disabled = true;
-  const r = await api('/api/admin/login', { method: 'POST',
-    body: { username: f.get('username'), password: f.get('password') } });
-  $('#lb').disabled = false;
-  if (!r.ok) { $('#le').textContent = r.message || 'Không đăng nhập được.'; return; }
-  $('#le').textContent = ''; load();
-});
-$('#out').addEventListener('click', async () => { await api('/api/logout', { method: 'POST' }); location.reload(); });
-$('#pw').addEventListener('click', async () => {
-  const c = prompt('Mật khẩu hiện tại:'); if (!c) return;
-  const n = prompt('Mật khẩu mới (ít nhất 8 ký tự):'); if (!n) return;
-  const r = await api('/api/admin/password', { method: 'POST', body: { current: c, next: n } });
-  toast(r.ok ? 'Đã đổi mật khẩu' : 'Không đổi được', r.message || '', !!r.ok);
-});
-
-/* ---------- Tải ---------- */
-function q() {
-  const p = new URLSearchParams();
-  ['user_id','type_code','brand','department','from','to','only'].forEach(k => {
-    const el = document.querySelector(`[data-q="${k}"]`);
-    if (el && el.value) p.set(k, el.value);
-  });
-  return p.toString();
+if (db.prepare('SELECT COUNT(*) n FROM activity_types').get().n === 0) {
+  const ins = db.prepare(
+    'INSERT INTO activity_types (code,name,limit_minutes,counts_toward_limit,sort_order) VALUES (?,?,?,?,?)'
+  );
+  db.transaction(() => [
+    ['smoke', 'Đi hút thuốc', 10, 1, 1],
+    ['wc1', 'Đi vệ sinh nhẹ', 10, 1, 2],
+    ['wc2', 'Đi vệ sinh nặng', 15, 1, 3],
+    ['pick', 'Lấy đồ', 15, 1, 4],
+    ['net', 'Lỗi mạng', 15, 0, 5],
+  ].forEach((t) => ins.run(...t)))();
 }
 
-async function load() {
-  const r = await fetch('/api/admin/board?' + q());
-  if (r.status === 401 || r.status === 403) { $('#gate').hidden = false; $('#app').hidden = true; return; }
-  B = await r.json();
-  skew = B.server_time - Date.now();
-  $('#gate').hidden = true; $('#app').hidden = false;
-  TAB === 'b' ? renderBoard() : renderUsers();
+if (db.prepare('SELECT COUNT(*) n FROM users').get().n === 0) {
+  const u = process.env.ADMIN_USER || 'admin';
+  const p = process.env.ADMIN_PASSWORD || 'doi-mat-khau-ngay';
+  db.prepare(
+    `INSERT INTO users (name,key,username,password_hash,role,department,created_at)
+     VALUES (?,?,?,?,'admin','RISK',?)`
+  ).run('Quản trị', newKey(), u, bcrypt.hashSync(p, 10), Date.now());
+  console.log(`[seed] Quản trị: ${u} / ${p} — đổi mật khẩu ngay sau khi đăng nhập.`);
 }
 
-/* ---------- Theo dõi ---------- */
-function renderBoard() {
-  const lanes = B.lanes.map(c => {
-    const h = c.holder, label = `${c.department}${c.brand ? ' · ' + c.brand : ''}`;
-    if (!h) return `<div class="lane"><div class="ic">${c.department.slice(0,2)}</div>
-      <div class="m"><div class="a">${label}</div><div class="b">Trống · ${c.headcount} nhân sự</div></div></div>`;
-    const l = leftOf(h);
-    return `<div class="lane ${l < 0 ? 'over' : 'busy'}">
-      <div class="ic">${c.department.slice(0,2)}</div>
-      <div class="m"><div class="a">${esc(h.user_name)}</div>
-        <div class="b">${label} · ${h.type_name}</div></div>
-      <div class="cd" data-cd="${h.id}">${clk(l)}</div>
-      <i class="fill" data-fill="${h.id}" style="width:${pctOf(h)}%"></i></div>`;
-  }).join('');
+/* ============================================================
+   TIỆN ÍCH
+   ============================================================ */
+const lockKey = (brand, dept) => `${brand || '-'}|${dept || '-'}`;
+const now = () => Date.now();
 
-  const cb = {
-    staff: '<span class="sub">Nhân viên</span>',
-    auto: '<span class="pill amb">Quên bấm</span>',
-    admin: '<span class="pill">Quản trị</span>',
+const types = () =>
+  db.prepare('SELECT * FROM activity_types WHERE is_active=1 ORDER BY sort_order')
+    .all().map((t) => ({ ...t, counts_toward_limit: !!t.counts_toward_limit }));
+
+function typeByCode(code) {
+  const t = db.prepare('SELECT * FROM activity_types WHERE code=? AND is_active=1').get(code);
+  return t ? { ...t, counts_toward_limit: !!t.counts_toward_limit } : null;
+}
+
+/* Đóng ca bị bỏ quên — chạy trước mọi lần đọc trạng thái.
+   Không có cái này thì một người quên bấm sẽ khóa bộ phận vĩnh viễn. */
+function sweepStale() {
+  const open = db.prepare('SELECT * FROM activities WHERE ended_at IS NULL').all();
+  const upd = db.prepare(`UPDATE activities
+    SET ended_at=?, duration_sec=?, is_over_limit=1, closed_by='auto', lock_key=NULL WHERE id=?`);
+  let n = 0;
+  db.transaction(() => {
+    for (const a of open) {
+      const deadline = a.started_at + (a.limit_minutes + AUTO_CLOSE_GRACE_MIN) * 60000;
+      if (now() > deadline) {
+        upd.run(deadline, Math.round((deadline - a.started_at) / 1000), a.id);
+        n++;
+      }
+    }
+  })();
+  return n;
+}
+
+const openFor = (uid) =>
+  db.prepare('SELECT * FROM activities WHERE user_id=? AND ended_at IS NULL').get(uid);
+
+const holderOf = (brand, dept) =>
+  db.prepare(`SELECT a.*, u.name user_name FROM activities a JOIN users u ON u.id=a.user_id
+              WHERE a.lock_key=? AND a.ended_at IS NULL`).get(lockKey(brand, dept));
+
+const openInDept = (brand, dept) =>
+  db.prepare(`SELECT a.*, u.name user_name FROM activities a JOIN users u ON u.id=a.user_id
+              WHERE a.ended_at IS NULL AND IFNULL(a.brand,'-')=? AND IFNULL(a.department,'-')=?
+              ORDER BY a.started_at`).all(brand || '-', dept || '-');
+
+function present(a) {
+  const left = Math.round((a.started_at + a.limit_minutes * 60000 - now()) / 1000);
+  return {
+    id: a.id, user_id: a.user_id, user_name: a.user_name,
+    type_code: a.type_code, type_name: (typeByCode(a.type_code) || {}).name || a.type_code,
+    brand: a.brand, department: a.department,
+    started_at: a.started_at, limit_minutes: a.limit_minutes,
+    remaining_seconds: left, over_limit: left < 0,
   };
-
-  const trs = B.rows.map(r => `<tr>
-    <td class="wide"><div style="font-weight:600">${esc(r.user_name)}</div>
-      <div style="margin-top:5px;display:inline-flex;gap:5px">
-        <span class="pill">${r.department || '—'}</span>
-        ${r.brand ? `<span class="pill pri">${r.brand}</span>` : ''}</div></td>
-    <td>${r.type_name}<div class="sub">cho phép ${r.limit_minutes} phút</div></td>
-    <td>${dmy(r.started_at)}<div class="sub">${hms(r.started_at)}</div></td>
-    <td>${hms(r.ended_at)}</td>
-    <td>${r.duration_sec == null ? '<span class="pill amb">Đang chạy</span>'
-      : `<span style="font-weight:600">${Math.floor(r.duration_sec/60)}p${pad(r.duration_sec%60)}s</span>
-         <div style="margin-top:4px"><span class="pill ${r.is_over_limit ? 'red' : 'pri'}">${r.is_over_limit ? 'Quá giờ' : 'Trong giờ'}</span></div>`}</td>
-    <td>${cb[r.closed_by] || '<span class="sub">—</span>'}</td>
-    <td class="sub">${r.ip || '—'}</td>
-    <td style="text-align:right">${r.ended_at ? '<span class="sub">—</span>'
-      : `<button class="btn btn-red btn-sm" onclick="closeAct(${r.id})">Đóng hộ</button>`}</td></tr>`).join('');
-
-  const sel = (k, o, ph) => `<select data-q="${k}" onchange="load()"><option value="">${ph}</option>${o}</select>`;
-
-  $('#pb').innerHTML = `
-    <div class="lanes">${lanes || '<div class="lane"><div class="m"><div class="b">Chưa có nhân sự nào.</div></div></div>'}</div>
-
-    <div class="kpis">
-      <div class="kpi"><div class="n">${B.stats.total}</div><div class="l">Lượt khớp bộ lọc</div></div>
-      <div class="kpi amb"><div class="n">${B.stats.running}</div><div class="l">Đang diễn ra</div></div>
-      <div class="kpi red"><div class="n">${B.stats.over}</div><div class="l">Quá giờ</div></div>
-      <div class="kpi"><div class="n">${B.stats.forgot}</div><div class="l">Quên bấm dừng</div></div>
-    </div>
-
-    <div class="fil">
-      <div class="f"><label>Nhân viên</label>${sel('user_id',
-        B.users.filter(u=>u.role==='staff').map(u=>`<option value="${u.id}">${esc(u.name)}</option>`).join(''),'Tất cả')}</div>
-      <div class="f"><label>Hoạt động</label>${sel('type_code',
-        B.types.map(t=>`<option value="${t.code}">${t.name}</option>`).join(''),'Tất cả')}</div>
-      <div class="f"><label>Bộ phận</label>${sel('department',
-        B.departments.map(d=>`<option>${d}</option>`).join(''),'Tất cả')}</div>
-      <div class="f"><label>Brand</label>${sel('brand',
-        B.brands.map(b=>`<option>${b}</option>`).join(''),'Tất cả')}</div>
-      <div class="f"><label>Từ ngày</label><input type="date" data-q="from" onchange="load()"></div>
-      <div class="f"><label>Đến ngày</label><input type="date" data-q="to" onchange="load()"></div>
-      <div class="f"><label>Chỉ xem</label>${sel('only',
-        '<option value="over">Quá giờ</option><option value="forgot">Quên bấm dừng</option>','Tất cả')}</div>
-      <button class="btn btn-sm" onclick="clearFil()">Xóa lọc</button>
-    </div>
-
-    <div class="tw"><table>
-      <thead><tr><th class="wide">Nhân viên</th><th>Hoạt động</th><th>Bắt đầu</th><th>Kết thúc</th>
-      <th>Thời lượng</th><th>Kết thúc bởi</th><th>IP</th><th style="text-align:right">Xử lý</th></tr></thead>
-      <tbody>${trs || '<tr><td colspan="8" class="empty">Chưa có hoạt động nào khớp bộ lọc.</td></tr>'}</tbody>
-    </table></div>
-    <div class="sub" style="margin-top:10px">${B.rows.length} bản ghi hiển thị</div>`;
 }
 
-function clearFil() { document.querySelectorAll('[data-q]').forEach(e => e.value = ''); load(); }
-
-async function closeAct(id) {
-  if (!confirm('Đóng hoạt động này ngay bây giờ?')) return;
-  const r = await api('/api/admin/close/' + id, { method: 'POST' });
-  toast(r.ok ? 'Đã đóng hộ' : 'Không đóng được', r.message || '', !!r.ok);
-  load();
+function lanes() {
+  return db.prepare(
+    `SELECT brand, department, COUNT(*) headcount FROM users
+     WHERE is_active=1 AND role='staff' AND department IS NOT NULL
+     GROUP BY brand, department ORDER BY department, brand`
+  ).all().map((p) => {
+    const h = holderOf(p.brand, p.department);
+    return { ...p, holder: h ? present(h) : null };
+  });
 }
 
-/* ---------- Nhân sự ---------- */
-function linkOf(k) { return location.origin + '/k/' + k; }
+/* ============================================================
+   NGHIỆP VỤ
+   ============================================================ */
+function startActivity(user, code, ip, ua) {
+  const t = typeByCode(code);
+  if (!t) return { ok: false, message: 'Loại hoạt động không tồn tại.' };
+  if (openFor(user.id)) return { ok: false, message: 'Bạn đang có một hoạt động chưa kết thúc.' };
 
-function renderUsers() {
-  const staff = B.users.filter(u => u.role === 'staff');
-  const trs = staff.map(u => `<tr>
-    <td class="wide"><div style="font-weight:600">${esc(u.name)}</div>
-      <div style="margin-top:5px;display:inline-flex;gap:5px">
-        <span class="pill">${u.department || '—'}</span>
-        ${u.brand ? `<span class="pill pri">${u.brand}</span>` : ''}
-        ${u.is_active ? '' : '<span class="pill red">Đã khóa</span>'}</div></td>
-    <td><div class="keybox"><code>${u.key}</code>
-      <button class="btn btn-sm" onclick="copyLink('${u.key}','${esc(u.name).replace(/'/g,"\\'")}')">Chép link</button></div></td>
-    <td><select style="width:auto;min-width:92px" onchange="setLoc(${u.id},this.value)">
-        <option value="VN" ${u.location === 'VN' ? 'selected' : ''}>VN</option>
-        <option value="ARM" ${u.location === 'ARM' ? 'selected' : ''}>ARM</option>
-      </select>
-      <div class="sub" style="margin-top:4px">${u.timezone || ''}</div></td>
-    <td>${u.work_days
-      ? `<span class="pill pri">${u.work_days} ngày</span>`
-      : '<span class="pill red">chưa có lịch</span>'}</td>
-    <td>${u.bound
-      ? `<span class="pill pri"><span class="dot"></span>Đã gắn máy</span>
-         <div class="sub" style="margin-top:4px">${dmy(u.device_seen_at)}</div>`
-      : '<span class="pill">Chưa mở lần nào</span>'}</td>
-    <td style="text-align:right;white-space:nowrap">
-      ${u.bound ? `<button class="btn btn-sm" onclick="post(${u.id},'unbind')">Gỡ máy</button>` : ''}
-      <button class="btn btn-sm" onclick="post(${u.id},'rekey')">Cấp key mới</button>
-      ${u.is_active
-        ? `<button class="btn btn-red btn-sm" onclick="lockU(${u.id})">Khóa</button>`
-        : `<button class="btn btn-sm" onclick="upd(${u.id},{is_active:1})">Mở</button>`}</td></tr>`).join('');
+  const needsLock = t.counts_toward_limit;
 
-  const depOpts = B.departments.map(d => `<option>${d}</option>`).join('');
-  const brOpts = '<option value="">—</option>' + B.brands.map(b => `<option>${b}</option>`).join('');
+  // Kiểm tra trước chỉ để có thông báo dễ hiểu. Chốt chặn thật là UNIQUE bên dưới.
+  if (needsLock) {
+    const h = holderOf(user.brand, user.department);
+    if (h) return {
+      ok: false,
+      message: `${h.user_name} đang "${(typeByCode(h.type_code) || {}).name}". Bộ phận chỉ cho 1 người rời chỗ cùng lúc.`,
+    };
+  }
 
-  $('#pu').innerHTML = `
-    <div class="card card-p" style="margin-bottom:12px">
-      <div style="font-size:11.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--tx3);margin-bottom:10px">
-        Nhập lịch ca tháng từ Excel / CSV</div>
-      <div class="row">
-        <div class="f" style="max-width:170px"><label>Tháng áp dụng</label>
-          <input type="month" id="schYm" value="${new Date().toISOString().slice(0, 7)}"></div>
-        <div class="f"><label>File lịch</label><input type="file" id="schFile" accept=".xlsx,.xls,.csv"></div>
-        <button class="btn" onclick="schImport('preview')">Xem trước</button>
-        <button class="btn btn-pri" onclick="schImport('merge')">Merge</button>
-        <button class="btn btn-red" onclick="schImport('replace')">Ghi đè tháng</button>
-      </div>
-      <div id="schOut" class="sub" style="margin-top:10px;line-height:1.6"></div>
-      <div class="note" style="font-size:12.5px;color:var(--tx3);margin-top:8px;line-height:1.55">
-        Một dòng một người, mỗi ngày trong tháng một cột:
-        <span class="mono">Ma | Ten | KhuVuc | BoPhan | Brand | 1 | 2 | … | 31</span>.
-        Ô ghi <span class="mono">08:00-16:00</span>, để trống hoặc <span class="mono">OFF</span> là nghỉ.
-        Giờ trong file là <b>giờ địa phương</b> của người đó — KhuVuc <span class="mono">VN</span> hay
-        <span class="mono">ARM</span> quyết định múi giờ. Dùng chung được file của bot Telegram,
-        chỉ cần đổi cột TelegramID thành cột <span class="mono">Ma</span>.
-      </div>
-    </div>
-
-    <div class="card card-p" style="margin-bottom:12px">
-      <div class="row">
-        <div class="f"><label>Tên nhân viên</label><input id="nn" placeholder="Nguyễn Thu Hà"></div>
-        <div class="f" style="max-width:170px"><label>Bộ phận</label><select id="nd">${depOpts}</select></div>
-        <div class="f" style="max-width:120px"><label>Brand</label><select id="nb">${brOpts}</select></div>
-        <button class="btn btn-pri" onclick="addU()">Thêm</button>
-      </div>
-    </div>
-
-    <div class="card card-p" style="margin-bottom:16px">
-      <div style="font-size:11.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--tx3);margin-bottom:10px">
-        Thêm hàng loạt — mỗi dòng: Tên | Bộ phận | Brand</div>
-      <textarea id="bk" rows="6" placeholder="Nguyễn Thu Hà | CS | AE
-Trần Minh Anh | CS | AE
-Đỗ Thanh Tùng | VIP | ST"></textarea>
-      <button class="btn btn-pri" style="margin-top:10px" onclick="bulk()">Thêm tất cả</button>
-    </div>
-
-    <div class="tw"><table>
-      <thead><tr><th class="wide">Nhân viên</th><th>Link vào ca</th><th>Khu vực</th>
-        <th>Lịch tháng này</th><th>Thiết bị</th><th style="text-align:right">Xử lý</th></tr></thead>
-      <tbody>${trs || '<tr><td colspan="6" class="empty">Chưa có nhân viên nào.</td></tr>'}</tbody>
-    </table></div>
-    <div class="sub" style="margin-top:10px">${staff.length} nhân viên · gửi link cho từng người một lần,
-      họ lưu vào màn hình chính là xong</div>`;
-}
-
-async function schImport(mode) {
-  const f = $('#schFile').files[0];
-  const ym = $('#schYm').value;
-  if (!f) return toast('Chưa chọn file', 'Chọn file .xlsx hoặc .csv trước.', false);
-  if (!ym) return toast('Chưa chọn tháng', 'Cần tháng áp dụng.', false);
-  if (mode === 'replace' && !confirm(`Ghi đè toàn bộ lịch tháng ${ym}? Lịch cũ của MỌI người trong tháng này sẽ bị xoá.`)) return;
-
-  const out = $('#schOut');
-  out.textContent = 'Đang đọc file…';
-
-  let res, r;
   try {
-    res = await fetch(`/api/admin/schedule/import?ym=${ym}&mode=${mode}`, {
-      method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: f,
-    });
+    db.prepare(`INSERT INTO activities
+      (user_id,type_code,brand,department,limit_minutes,started_at,lock_key,ip,user_agent)
+      VALUES (?,?,?,?,?,?,?,?,?)`).run(
+      user.id, t.code, user.brand, user.department, t.limit_minutes, now(),
+      needsLock ? lockKey(user.brand, user.department) : null, ip, (ua || '').slice(0, 400)
+    );
+    return { ok: true, message: `Đã bắt đầu "${t.name}" · ${t.limit_minutes} phút.` };
   } catch (e) {
-    out.innerHTML = `<b style="color:var(--red)">Không gọi được máy chủ.</b> Kiểm tra kết nối rồi thử lại.`;
-    return;
+    if (String(e.code).includes('SQLITE_CONSTRAINT')) {
+      return { ok: false, message: 'Vừa có người khác trong bộ phận bắt đầu trước. Chờ chút rồi bấm lại.' };
+    }
+    throw e;
+  }
+}
+
+function stopActivity(user, closedBy = 'staff', id = null) {
+  const a = id
+    ? db.prepare('SELECT * FROM activities WHERE id=? AND ended_at IS NULL').get(id)
+    : openFor(user.id);
+  if (!a) return { ok: false, message: 'Không có hoạt động nào đang chạy.' };
+
+  const end = now();
+  const sec = Math.round((end - a.started_at) / 1000);
+  const over = sec > a.limit_minutes * 60;
+
+  db.prepare(`UPDATE activities SET ended_at=?,duration_sec=?,is_over_limit=?,closed_by=?,lock_key=NULL
+              WHERE id=?`).run(end, sec, over ? 1 : 0, closedBy, a.id);
+
+  return {
+    ok: true, over_limit: over,
+    message: over
+      ? `Đã kết thúc — quá giờ ${Math.ceil(sec / 60 - a.limit_minutes)} phút.`
+      : 'Đã kết thúc đúng giờ.',
+  };
+}
+
+function stateFor(user) {
+  sweepStale();
+  const mine = openFor(user.id);
+  const h = holderOf(user.brand, user.department);
+  const locked = h && (!mine || h.id !== mine.id);
+  const today0 = new Date(); today0.setHours(0, 0, 0, 0);
+
+  const todayRows = db.prepare(
+    `SELECT * FROM activities WHERE user_id=? AND started_at>=? ORDER BY started_at DESC`
+  ).all(user.id, today0.getTime());
+
+  return {
+    server_time: now(),
+    me: { id: user.id, name: user.name, department: user.department, brand: user.brand, role: user.role },
+    current: mine ? present({ ...mine, user_name: user.name }) : null,
+    locked_by: locked ? present(h) : null,
+    lane: {
+      brand: user.brand, department: user.department,
+      headcount: db.prepare(
+        `SELECT COUNT(*) n FROM users WHERE is_active=1 AND role='staff'
+         AND IFNULL(brand,'-')=? AND IFNULL(department,'-')=?`
+      ).get(user.brand || '-', user.department || '-').n,
+      open: openInDept(user.brand, user.department).map(present),
+    },
+    today: {
+      count: todayRows.length,
+      minutes: Math.round(todayRows.reduce((s, r) => s + (r.duration_sec || 0), 0) / 60),
+      over: todayRows.filter((r) => r.is_over_limit).length,
+      rows: todayRows.slice(0, 6).map((r) => ({
+        type_name: (typeByCode(r.type_code) || {}).name || r.type_code,
+        started_at: r.started_at, duration_sec: r.duration_sec,
+        is_over_limit: !!r.is_over_limit, closed_by: r.closed_by,
+      })),
+    },
+    types: types().map((t) => ({
+      code: t.code, name: t.name, limit_minutes: t.limit_minutes,
+      counts_toward_limit: t.counts_toward_limit,
+      disabled: !!mine || (locked && t.counts_toward_limit),
+    })),
+  };
+}
+
+/* ============================================================
+   QUẢN TRỊ
+   ============================================================ */
+function history(f = {}) {
+  const w = [], p = [];
+  if (f.user_id)    { w.push('a.user_id=?');    p.push(f.user_id); }
+  if (f.type_code)  { w.push('a.type_code=?');  p.push(f.type_code); }
+  if (f.brand)      { w.push('a.brand=?');      p.push(f.brand); }
+  if (f.department) { w.push('a.department=?'); p.push(f.department); }
+  if (f.from)       { w.push('a.started_at>=?'); p.push(new Date(f.from + 'T00:00:00').getTime()); }
+  if (f.to)         { w.push('a.started_at<=?'); p.push(new Date(f.to + 'T23:59:59').getTime()); }
+  if (f.only === 'over')   w.push('a.is_over_limit=1');
+  if (f.only === 'forgot') w.push("a.closed_by='auto'");
+
+  const where = w.length ? 'WHERE ' + w.join(' AND ') : '';
+  const limit = Math.min(+f.limit || 200, 100000);
+
+  const rows = db.prepare(
+    `SELECT a.*, u.name user_name FROM activities a JOIN users u ON u.id=a.user_id
+     ${where} ORDER BY a.started_at DESC LIMIT ?`).all(...p, limit);
+
+  const s = db.prepare(
+    `SELECT COUNT(*) total,
+            SUM(CASE WHEN a.is_over_limit=1 THEN 1 ELSE 0 END) ov,
+            SUM(CASE WHEN a.closed_by='auto' THEN 1 ELSE 0 END) fg,
+            SUM(CASE WHEN a.ended_at IS NULL THEN 1 ELSE 0 END) rn
+     FROM activities a ${where}`).get(...p);
+
+  return {
+    rows: rows.map((r) => ({
+      ...present(r), ended_at: r.ended_at, duration_sec: r.duration_sec,
+      is_over_limit: !!r.is_over_limit, closed_by: r.closed_by, ip: r.ip,
+    })),
+    stats: { total: s.total || 0, over: s.ov || 0, forgot: s.fg || 0, running: s.rn || 0 },
+  };
+}
+
+/* ============================================================
+   CHẤM CÔNG CA — Lên ca / Xuống ca / Chấm công
+   ============================================================ */
+const PUNCH_KINDS = { in: 'Lên ca', out: 'Xuống ca', log: 'Chấm công' };
+
+const LATE_LEVELS = {
+  in5:   { label: 'Trễ lên ca ~5p',    kind: 'in',  min: 5 },
+  in30:  { label: 'Trễ lên ca ~30p',   kind: 'in',  min: 30 },
+  out60: { label: 'Trễ xuống ca ~60p', kind: 'out', min: 60 },
+};
+/* ============================================================
+   MÚI GIỜ THEO KHU VỰC
+   Team trải VN và Armenia, lệch 3 tiếng. Mỗi nhân viên có khu vực riêng,
+   giờ ca trong file luôn là giờ ĐỊA PHƯƠNG của người đó.
+   ============================================================ */
+const LOCATION_TZ = {
+  VN: 'Asia/Ho_Chi_Minh', VIETNAM: 'Asia/Ho_Chi_Minh', VIET: 'Asia/Ho_Chi_Minh',
+  ARM: 'Asia/Yerevan', ARMENIA: 'Asia/Yerevan', AM: 'Asia/Yerevan',
+};
+const DEFAULT_TZ = process.env.DEFAULT_TZ || 'Asia/Ho_Chi_Minh';
+const LOCATIONS = ['VN', 'ARM'];
+
+const tzOf = (loc) => LOCATION_TZ[String(loc || '').trim().toUpperCase()] || DEFAULT_TZ;
+
+/* Đổi "ngày + giờ địa phương" sang mốc thời gian tuyệt đối.
+   Cùng cách bot Telegram đang dùng, đã chạy thật nên giữ nguyên. */
+function zonedToUtc(dateStr, timeStr, timeZone) {
+  const guess = new Date(`${dateStr}T${timeStr}:00.000Z`);
+  const asLocal = new Date(guess.toLocaleString('en-US', { timeZone }));
+  const asUtc = new Date(guess.toLocaleString('en-US', { timeZone: 'UTC' }));
+  return new Date(guess.getTime() + (asUtc.getTime() - asLocal.getTime()));
+}
+
+const dayInTz = (at, tz) => new Intl.DateTimeFormat('en-CA', { timeZone: tz }).format(new Date(at));
+const shiftTz = ymd => { const d = new Date(ymd + 'T00:00:00Z'); return d; };
+function addDays(ymd, n) {
+  const d = new Date(ymd + 'T12:00:00Z');
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+
+const MAX_OFF_PER_MONTH = Math.max(1, Number(process.env.MAX_OFF_PER_MONTH) || 15);
+// Cùng một ngày, mỗi bộ phận (theo cặp brand + bộ phận) cho tối đa bấy nhiêu người nghỉ.
+const MAX_OFF_PER_DAY_DEPT = Math.max(1, Number(process.env.MAX_OFF_PER_DAY_DEPT) || 1);
+
+/* Ca của nhân viên quanh thời điểm `at`, đọc từ lịch tháng đã nhập.
+   Xét cả ngày hôm trước để bắt ca qua đêm (vd 22:00–06:00 giờ địa phương). */
+function shiftWindow(user, at = now()) {
+  const tz = tzOf(user.location);
+  const today = dayInTz(at, tz);
+  const cands = [];
+
+  for (const d of [addDays(today, -1), today]) {
+    const row = db.prepare('SELECT * FROM shift_days WHERE user_id=? AND day=?').get(user.id, d);
+    if (!row) continue;
+    const startUtc = zonedToUtc(d, row.start_hm, tz).getTime();
+    let endUtc = zonedToUtc(d, row.end_hm, tz).getTime();
+    if (endUtc <= startUtc) endUtc += 24 * 3600000;   // ca qua đêm
+    cands.push({ day: d, start: startUtc, end: endUtc, start_hm: row.start_hm, end_hm: row.end_hm, tz });
+  }
+  return cands;
+}
+
+/* Mốc giờ theo lịch cho một lần chấm.
+   Trả về null nếu hôm đó nghỉ hoặc chưa nhập lịch — khi đó không tính trễ. */
+function scheduledFor(user, kind, at = now()) {
+  if (kind === 'log') return null;
+  const cands = shiftWindow(user, at);
+  if (!cands.length) return null;
+
+  // Chọn ca có mốc gần thời điểm bấm nhất
+  const pick = cands.reduce((best, c) => {
+    const t = kind === 'in' ? c.start : c.end;
+    const bt = kind === 'in' ? best.start : best.end;
+    return Math.abs(at - t) < Math.abs(at - bt) ? c : best;
+  });
+  return kind === 'in' ? pick.start : pick.end;
+}
+
+function lateOf(kind, diffMin) {
+  if (diffMin <= 0) return null;
+  if (kind === 'in')  return diffMin >= 30 ? 'in30' : (diffMin >= 5 ? 'in5' : null);
+  if (kind === 'out') return diffMin >= 60 ? 'out60' : null;
+  return null;
+}
+
+function punch(user, kind, ip, ua) {
+  if (!PUNCH_KINDS[kind]) return { ok: false, message: 'Loại chấm công không hợp lệ.' };
+
+  const at = now();
+  const tz = tzOf(user.location);
+  const sched = scheduledFor(user, kind, at);
+  const diff = sched ? Math.round((at - sched) / 60000) : 0;
+  const level = lateOf(kind, diff);
+  const hhmm = new Date(at).toLocaleTimeString('vi-VN', { hour12: false, timeZone: tz });
+
+  db.prepare(`INSERT INTO punches
+    (user_id,kind,brand,department,scheduled_at,actual_at,late_minutes,late_level,ip,user_agent)
+    VALUES (?,?,?,?,?,?,?,?,?,?)`).run(
+    user.id, kind, user.brand, user.department, sched, at,
+    Math.max(0, diff), level, ip, (ua || '').slice(0, 400));
+
+  return {
+    ok: true, late_level: level,
+    message: level
+      ? `${PUNCH_KINDS[kind]} lúc ${hhmm} — ${LATE_LEVELS[level].label} (${diff} phút).`
+      : (sched || kind === 'log'
+          ? `${PUNCH_KINDS[kind]} lúc ${hhmm}.`
+          : `${PUNCH_KINDS[kind]} lúc ${hhmm} — hôm nay chưa có lịch ca nên không tính trễ.`),
+  };
+}
+
+/* Trạng thái ca hôm nay */
+function shiftToday(user) {
+  const tz = tzOf(user.location);
+  const today = dayInTz(now(), tz);
+  const row = db.prepare('SELECT * FROM shift_days WHERE user_id=? AND day=?').get(user.id, today);
+  const from = zonedToUtc(today, '00:00', tz).getTime();
+
+  const rows = db.prepare('SELECT * FROM punches WHERE user_id=? AND actual_at>=? ORDER BY actual_at')
+    .all(user.id, from - 12 * 3600000);   // lùi 12h để bắt ca đêm
+
+  const lastIn = [...rows].reverse().find((r) => r.kind === 'in');
+  const lastOut = [...rows].reverse().find((r) => r.kind === 'out');
+
+  return {
+    on_shift: !!(lastIn && (!lastOut || lastOut.actual_at < lastIn.actual_at)),
+    checked_in_at: lastIn ? lastIn.actual_at : null,
+    checked_out_at: lastOut ? lastOut.actual_at : null,
+    day: today,
+    location: user.location,
+    timezone: tz,
+    has_shift: !!row,
+    shift_start: row ? row.start_hm : null,
+    shift_end: row ? row.end_hm : null,
+    rows: rows.map((r) => ({
+      kind: r.kind, kind_label: PUNCH_KINDS[r.kind], actual_at: r.actual_at,
+      late_minutes: r.late_minutes, late_level: r.late_level,
+      late_label: r.late_level ? LATE_LEVELS[r.late_level].label : null,
+    })),
+  };
+}
+
+/* Lịch sử chấm công — quản trị xem hết, nhân viên chỉ thấy của mình */
+function punchHistory(f = {}, viewer = null) {
+  const w = [], p = [];
+  if (viewer && viewer.role !== 'admin') { w.push('p.user_id=?'); p.push(viewer.id); }
+  else if (f.user_id) { w.push('p.user_id=?'); p.push(f.user_id); }
+  if (f.kind)       { w.push('p.kind=?');       p.push(f.kind); }
+  if (f.department) { w.push('p.department=?'); p.push(f.department); }
+  if (f.brand)      { w.push('p.brand=?');      p.push(f.brand); }
+  if (f.from)       { w.push('p.actual_at>=?'); p.push(new Date(f.from + 'T00:00:00').getTime()); }
+  if (f.to)         { w.push('p.actual_at<=?'); p.push(new Date(f.to + 'T23:59:59').getTime()); }
+  if (f.late_level) { w.push('p.late_level=?'); p.push(f.late_level); }
+  if (f.only_late)  w.push('p.late_level IS NOT NULL');
+
+  const where = w.length ? 'WHERE ' + w.join(' AND ') : '';
+  const rows = db.prepare(
+    `SELECT p.*, u.name user_name FROM punches p JOIN users u ON u.id=p.user_id
+     ${where} ORDER BY p.actual_at DESC LIMIT ?`).all(...p, Math.min(+f.limit || 300, 100000));
+
+  const s = db.prepare(
+    `SELECT COUNT(*) total,
+            SUM(CASE WHEN p.late_level='in5'   THEN 1 ELSE 0 END) a,
+            SUM(CASE WHEN p.late_level='in30'  THEN 1 ELSE 0 END) b,
+            SUM(CASE WHEN p.late_level='out60' THEN 1 ELSE 0 END) c
+     FROM punches p ${where}`).get(...p);
+
+  return {
+    rows: rows.map((r) => ({
+      id: r.id, user_name: r.user_name, user_id: r.user_id,
+      kind: r.kind, kind_label: PUNCH_KINDS[r.kind],
+      brand: r.brand, department: r.department,
+      scheduled_at: r.scheduled_at, actual_at: r.actual_at,
+      late_minutes: r.late_minutes, late_level: r.late_level,
+      late_label: r.late_level ? LATE_LEVELS[r.late_level].label : null, ip: r.ip,
+    })),
+    stats: {
+      total: s.total || 0, in5: s.a || 0, in30: s.b || 0, out60: s.c || 0,
+      late: (s.a || 0) + (s.b || 0) + (s.c || 0),
+    },
+  };
+}
+
+/* ============================================================
+   LỊCH OFF
+   ============================================================ */
+const ymOf = (day) => String(day).slice(0, 7);
+const isLocked = (ym) => !!db.prepare('SELECT 1 FROM off_locks WHERE ym=?').get(ym);
+
+/* Những ai trong cùng bộ phận đã nhận ngày đó */
+function whoOff(brand, dept, day, exceptUserId = null) {
+  return db.prepare(
+    `SELECT u.id, u.name FROM day_offs d JOIN users u ON u.id=d.user_id
+     WHERE d.day=? AND IFNULL(u.brand,'-')=? AND IFNULL(u.department,'-')=?
+       AND u.is_active=1 AND u.role='staff' AND (? IS NULL OR u.id<>?)`
+  ).all(day, brand || '-', dept || '-', exceptUserId, exceptUserId);
+}
+
+function myOffs(user, ym) {
+  const days = db.prepare('SELECT day FROM day_offs WHERE user_id=? AND day LIKE ? ORDER BY day')
+    .all(user.id, ym + '%').map((r) => r.day);
+
+  // Ngày đã đủ người nghỉ trong bộ phận -> làm mờ trên lịch thay vì để bấm rồi báo lỗi
+  const rows = db.prepare(
+    `SELECT d.day, u.name, COUNT(*) OVER (PARTITION BY d.day) n
+     FROM day_offs d JOIN users u ON u.id=d.user_id
+     WHERE d.day LIKE ? AND IFNULL(u.brand,'-')=? AND IFNULL(u.department,'-')=?
+       AND u.is_active=1 AND u.role='staff' AND u.id<>?`
+  ).all(ym + '%', user.brand || '-', user.department || '-', user.id);
+
+  const byDay = {};
+  rows.forEach((r) => { (byDay[r.day] = byDay[r.day] || []).push(r.name); });
+  const taken = Object.entries(byDay)
+    .filter(([, names]) => names.length >= MAX_OFF_PER_DAY_DEPT)
+    .map(([day, names]) => ({ day, names }));
+
+  // Lịch chính thức tháng đó — dùng để đối chiếu nguyện vọng đã được duyệt hay chưa
+  const workDays = db.prepare('SELECT day FROM shift_days WHERE user_id=? AND day LIKE ? ORDER BY day')
+    .all(user.id, ym + '%').map((r) => r.day);
+  const workSet = new Set(workDays);
+
+  const approved = days.filter((d) => !workSet.has(d));   // xin nghỉ, lịch cũng cho nghỉ
+  const rejected = days.filter((d) => workSet.has(d));    // xin nghỉ nhưng lịch vẫn xếp ca
+
+  return {
+    ym, days, used: days.length, max: MAX_OFF_PER_MONTH,
+    locked: isLocked(ym), taken, per_day: MAX_OFF_PER_DAY_DEPT,
+    has_schedule: workDays.length > 0,
+    work_days: workDays,
+    approved: approved.length,
+    rejected: rejected.length,
+  };
+}
+
+function toggleOff(user, day, byAdmin = false) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return { ok: false, message: 'Ngày không hợp lệ.' };
+  const ym = ymOf(day);
+  if (isLocked(ym) && !byAdmin) {
+    return { ok: false, message: `Tháng ${ym} đã bị khóa. Liên hệ quản lý nếu cần đổi.` };
   }
 
-  // Máy chủ trả về HTML thay vì JSON = route chưa tồn tại hoặc app lỗi.
-  // Nói rõ mã lỗi thay vì gộp hết thành "lỗi mạng".
-  const ctype = res.headers.get('content-type') || '';
-  if (!ctype.includes('application/json')) {
-    const why = res.status === 404
-      ? 'Máy chủ chưa có chức năng nhập lịch — <b>server.js và schedule.js trên máy chủ chưa được cập nhật</b>. Đẩy đủ 3 file <span class="mono">server.js</span>, <span class="mono">schedule.js</span>, <span class="mono">package.json</span> rồi deploy lại.'
-      : res.status === 413 ? 'File quá lớn (giới hạn 8MB). Xoá bớt sheet thừa hoặc lưu lại dạng .csv.'
-      : res.status === 401 || res.status === 403 ? 'Phiên đăng nhập đã hết. Tải lại trang và đăng nhập lại.'
-      : `Máy chủ trả về lỗi ${res.status}. Xem tab Logs trên Render để biết chi tiết.`;
-    out.innerHTML = `<b style="color:var(--red)">Lỗi ${res.status}.</b> ${why}`;
-    return;
+  const has = db.prepare('SELECT id FROM day_offs WHERE user_id=? AND day=?').get(user.id, day);
+  const dm = day.split('-').reverse().join('/');
+  if (has) {
+    db.prepare('DELETE FROM day_offs WHERE id=?').run(has.id);
+    return { ok: true, message: `Đã bỏ ngày nghỉ ${dm}.`, off: myOffs(user, ym) };
   }
 
-  r = await res.json().catch(() => ({ ok: false, message: 'Máy chủ trả về dữ liệu không đọc được.' }));
-
-  if (!r.ok) {
-    out.innerHTML = `<b style="color:var(--red)">${esc(r.message || 'Không đọc được file.')}</b>`
-      + (r.errors && r.errors.length ? `<br>${r.errors.slice(0, 5).map(esc).join('<br>')}` : '');
-    return;
+  const used = db.prepare('SELECT COUNT(*) n FROM day_offs WHERE user_id=? AND day LIKE ?')
+    .get(user.id, ym + '%').n;
+  if (used >= MAX_OFF_PER_MONTH && !byAdmin) {
+    return { ok: false, message: `Tháng này đã đủ ${MAX_OFF_PER_MONTH} ngày. Bỏ bớt ngày khác rồi chọn lại.` };
   }
 
-  const parts = [];
-  if (r.preview) {
-    parts.push(`<b>Xem trước tháng ${r.ym}:</b> ${r.count} người · ${r.dayCount} ngày làm.`);
-    if (r.matched.length) parts.push(`Khớp: ${r.matched.slice(0, 10).map(esc).join(', ')}${r.matched.length > 10 ? '…' : ''}`);
-  } else {
-    parts.push(`<b style="color:var(--pri)">${esc(r.message)}</b>`);
-    toast('Đã áp lịch', r.message, true);
+  // Trùng ngày trong cùng bộ phận. Node chạy một luồng và better-sqlite3 chạy đồng bộ,
+  // nên đoạn đếm rồi ghi này không bị chen ngang giữa chừng.
+  const others = whoOff(user.brand, user.department, day, user.id);
+  if (others.length >= MAX_OFF_PER_DAY_DEPT && !byAdmin) {
+    return {
+      ok: false,
+      message: MAX_OFF_PER_DAY_DEPT === 1
+        ? `${others[0].name} đã nhận nghỉ ngày ${dm}. Mỗi bộ phận chỉ 1 người nghỉ mỗi ngày.`
+        : `Ngày ${dm} đã đủ ${MAX_OFF_PER_DAY_DEPT} người nghỉ (${others.map((o) => o.name).join(', ')}).`,
+    };
   }
-  if (r.missing && r.missing.length)
-    parts.push(`<b style="color:var(--red)">Không tìm thấy ${r.missing.length} người trong danh sách:</b> ${r.missing.map(esc).join(', ')} — thêm họ vào bên dưới rồi nhập lại.`);
-  if (r.errors && r.errors.length)
-    parts.push(`<b style="color:var(--amb)">${r.errors.length} ô có vấn đề (đã coi là nghỉ):</b><br>${r.errors.slice(0, 6).map(esc).join('<br>')}${r.errors.length > 6 ? '<br>…' : ''}`);
 
-  out.innerHTML = parts.join('<br>');
-  if (!r.preview) load();
+  db.prepare('INSERT INTO day_offs (user_id,day,brand,department,created_at) VALUES (?,?,?,?,?)')
+    .run(user.id, day, user.brand, user.department, now());
+  return { ok: true, message: `Đã đăng ký nghỉ ${dm}.`, off: myOffs(user, ym) };
 }
 
-async function setLoc(id, location) {
-  const r = await api(`/api/admin/users/${id}/location`, { method: 'PUT', body: { location } });
-  toast(r.ok ? 'Đã đổi khu vực' : 'Không đổi được', r.message || '', !!r.ok);
-  load();
-}
+/* Tổng hợp cho quản trị: Tất cả / Chưa đăng ký / 1 / 2 / 3 / 4 ngày */
+function offSummary(ym, f = {}) {
+  const filter = String(f.filter || '');
+  const rows = db.prepare(
+    `SELECT u.id, u.name, u.department, u.brand,
+            (SELECT COUNT(*) FROM day_offs d WHERE d.user_id=u.id AND d.day LIKE ?) n,
+            (SELECT GROUP_CONCAT(d.day) FROM day_offs d WHERE d.user_id=u.id AND d.day LIKE ?) days
+     FROM users u WHERE u.role='staff' AND u.is_active=1
+     ORDER BY u.department, u.name`).all(ym + '%', ym + '%')
+    .filter((r) => (!f.user_id || r.id === +f.user_id)
+                && (!f.department || r.department === f.department)
+                && (!f.brand || r.brand === f.brand));
 
-async function copyLink(key, name) {
-  const url = linkOf(key);
-  try { await navigator.clipboard.writeText(url); toast('Đã chép link', `${name} — ${url}`, true); }
-  catch { prompt('Chép link này gửi cho ' + name + ':', url); }
-}
-
-async function addU() {
-  const r = await api('/api/admin/users', { method: 'POST',
-    body: { name: $('#nn').value, department: $('#nd').value, brand: $('#nb').value } });
-  toast(r.ok ? 'Đã thêm' : 'Không thêm được', r.message || '', !!r.ok);
-  if (r.ok) { $('#nn').value = ''; load(); }
-}
-
-async function bulk() {
-  const r = await api('/api/admin/users/bulk', { method: 'POST', body: { text: $('#bk').value } });
-  if (!r.ok) return toast('Không thêm được', r.message || '', false);
-  toast(`Đã thêm ${r.created.length} nhân viên`,
-    r.skipped.length ? `Bỏ qua ${r.skipped.length}: ${r.skipped.slice(0,2).join('; ')}` : 'Bấm “Chép link” để gửi cho từng người.', true);
-  $('#bk').value = ''; load();
-}
-
-async function post(id, what) {
-  const msg = what === 'rekey'
-    ? 'Cấp key mới? Link cũ sẽ không dùng được nữa.'
-    : 'Gỡ thiết bị đã gắn? Link cũ vẫn dùng được trên máy mới.';
-  if (!confirm(msg)) return;
-  const r = await api(`/api/admin/users/${id}/${what}`, { method: 'POST' });
-  toast(r.ok ? 'Xong' : 'Không thực hiện được', r.message || '', !!r.ok);
-  load();
-}
-
-async function upd(id, body) {
-  const r = await api('/api/admin/users/' + id, { method: 'PUT', body });
-  toast(r.ok ? 'Đã cập nhật' : 'Không cập nhật được', r.message || '', !!r.ok);
-  load();
-}
-
-async function lockU(id) {
-  if (!confirm('Khóa nhân viên này? Lịch sử hoạt động vẫn giữ lại.')) return;
-  const r = await api('/api/admin/users/' + id, { method: 'DELETE' });
-  toast(r.ok ? 'Đã khóa' : 'Không khóa được', r.message || '', !!r.ok);
-  load();
-}
-
-/* ---------- Khung ---------- */
-/* ---------- Bộ lọc dùng chung cho tab Chấm công / Trễ ---------- */
-function qp() {
-  const p = new URLSearchParams();
-  ['user_id','kind','department','brand','from','to','late_level'].forEach(k => {
-    const el = document.querySelector(`[data-p="${k}"]`);
-    if (el && el.value) p.set(k, el.value);
+  const workStmt = db.prepare('SELECT day FROM shift_days WHERE user_id=? AND day LIKE ?');
+  const shaped = rows.map((r) => {
+    const reqDays = r.days ? r.days.split(',').sort() : [];
+    const workSet = new Set(workStmt.all(r.id, ym + '%').map((x) => x.day));
+    return {
+      ...r,
+      days: reqDays,
+      has_schedule: workSet.size > 0,
+      // Nguyện vọng được duyệt = ngày xin nghỉ mà lịch chính thức cũng cho nghỉ
+      approved: reqDays.filter((d) => !workSet.has(d)),
+      rejected: reqDays.filter((d) => workSet.has(d)),
+      work_days: workSet.size,
+    };
   });
-  return p.toString();
+
+  return {
+    ym, locked: isLocked(ym), max: MAX_OFF_PER_MONTH,
+    rows: shaped.filter((r) => {
+      if (filter === 'none')    return r.n === 0;
+      if (filter === 'partial') return r.n > 0 && r.n < MAX_OFF_PER_MONTH;
+      if (filter === 'full')    return r.n >= MAX_OFF_PER_MONTH;
+      if (filter === 'conflict') return r.rejected.length > 0;
+      if (/^\d{1,2}$/.test(filter)) return r.n === +filter;
+      return true;
+    }),
+    has_schedule: shaped.some((r) => r.has_schedule),
+    counts: {
+      all: rows.length,
+      none: rows.filter((r) => r.n === 0).length,
+      partial: rows.filter((r) => r.n > 0 && r.n < MAX_OFF_PER_MONTH).length,
+      full: rows.filter((r) => r.n >= MAX_OFF_PER_MONTH).length,
+      // Người có nguyện vọng bị lịch xếp đè lên
+      conflict: shaped.filter((r) => r.rejected.length > 0).length,
+      // Số người theo từng mức cụ thể, dùng cho ô chọn chi tiết
+      byDays: Array.from({ length: MAX_OFF_PER_MONTH }, (_, i) =>
+        rows.filter((r) => r.n === i + 1).length),
+    },
+  };
 }
 
-const KIND_PILL = { in: 'pri', out: 'amb', log: '' };
-
-function punchTable(d, showLateFilter) {
-  const sel = (k, o, ph) => `<select data-p="${k}" onchange="${showLateFilter ? 'loadLate()' : 'loadPunches()'}">
-    <option value="">${ph}</option>${o}</select>`;
-
-  const trs = d.rows.map(r => `<tr>
-    <td class="wide"><div style="font-weight:600">${esc(r.user_name)}</div>
-      <div style="margin-top:5px;display:inline-flex;gap:5px">
-        <span class="pill">${r.department || '—'}</span>
-        ${r.brand ? `<span class="pill pri">${r.brand}</span>` : ''}</div></td>
-    <td><span class="pill ${KIND_PILL[r.kind]}">${r.kind_label}</span></td>
-    <td>${dmy(r.actual_at)}<div class="sub">${hms(r.actual_at)}</div></td>
-    <td class="sub">${r.scheduled_at ? hms(r.scheduled_at) : '—'}</td>
-    <td>${r.late_label
-      ? `<span class="pill ${r.late_level === 'in5' ? 'amb' : 'red'}">${r.late_label}</span>
-         <div class="sub" style="margin-top:4px">${r.late_minutes} phút</div>`
-      : '<span class="pill pri">Đúng giờ</span>'}</td>
-    <td class="sub">${r.ip || '—'}</td></tr>`).join('');
-
-  return `
-    <div class="kpis">
-      <div class="kpi"><div class="n">${d.stats.total}</div><div class="l">Lượt khớp bộ lọc</div></div>
-      <div class="kpi amb"><div class="n">${d.stats.in5}</div><div class="l">Trễ lên ca ~5p</div></div>
-      <div class="kpi red"><div class="n">${d.stats.in30}</div><div class="l">Trễ lên ca ~30p</div></div>
-      <div class="kpi red"><div class="n">${d.stats.out60}</div><div class="l">Trễ xuống ca ~60p</div></div>
-    </div>
-    <div class="fil">
-      ${d.is_admin ? `<div class="f"><label>Nhân viên</label>${sel('user_id',
-        d.users.map(u => `<option value="${u.id}">${esc(u.name)}</option>`).join(''), 'Tất cả')}</div>` : ''}
-      ${showLateFilter
-        ? `<div class="f"><label>Mức trễ</label>${sel('late_level',
-            Object.entries(d.levels).map(([k, v]) => `<option value="${k}">${v.label}</option>`).join(''), 'Tất cả')}</div>`
-        : `<div class="f"><label>Loại</label>${sel('kind',
-            Object.entries(d.kinds).map(([k, v]) => `<option value="${k}">${v}</option>`).join(''), 'Tất cả')}</div>`}
-      <div class="f"><label>Bộ phận</label>${sel('department',
-        d.departments.map(x => `<option>${x}</option>`).join(''), 'Tất cả')}</div>
-      <div class="f"><label>Brand</label>${sel('brand',
-        d.brands.map(x => `<option>${x}</option>`).join(''), 'Tất cả')}</div>
-      <div class="f"><label>Từ ngày</label><input type="date" data-p="from"
-        onchange="${showLateFilter ? 'loadLate()' : 'loadPunches()'}"></div>
-      <div class="f"><label>Đến ngày</label><input type="date" data-p="to"
-        onchange="${showLateFilter ? 'loadLate()' : 'loadPunches()'}"></div>
-      <button class="btn btn-sm" onclick="clearP('${showLateFilter ? 'l' : 'p'}')">Xóa lọc</button>
-    </div>
-    <div class="tw"><table>
-      <thead><tr><th class="wide">Nhân viên</th><th>Loại</th><th>Giờ bấm</th><th>Theo lịch</th>
-        <th>Mức trễ</th><th>IP</th></tr></thead>
-      <tbody>${trs || `<tr><td colspan="6" class="empty">${showLateFilter
-        ? 'Không có ai trễ theo bộ lọc này.' : 'Chưa có bản ghi chấm công nào.'}</td></tr>`}</tbody>
-    </table></div>
-    <div class="sub" style="margin-top:10px">${d.rows.length} bản ghi hiển thị</div>`;
+function setLock(ym, locked) {
+  if (locked) db.prepare('INSERT OR REPLACE INTO off_locks (ym,locked_at) VALUES (?,?)').run(ym, now());
+  else db.prepare('DELETE FROM off_locks WHERE ym=?').run(ym);
+  return { ok: true, message: locked ? `Đã khóa lịch off tháng ${ym}.` : `Đã mở lịch off tháng ${ym}.` };
 }
 
-function clearP(which) {
-  document.querySelectorAll('[data-p]').forEach(e => e.value = '');
-  which === 'l' ? loadLate() : loadPunches();
+/* ============================================================
+   ÁP LỊCH THÁNG
+   mode 'merge'   : chỉ đụng tới người có trong file, người khác giữ nguyên
+   mode 'replace' : xoá sạch lịch tháng đó của MỌI người rồi ghi lại theo file
+   ============================================================ */
+function applySchedule(parsed, mode = 'merge') {
+  const { ym, rows } = parsed;
+  const matched = [], missing = [];
+
+  const byKey = db.prepare("SELECT * FROM users WHERE key=? AND role='staff'");
+  const byName = db.prepare("SELECT * FROM users WHERE name=? AND role='staff'");
+
+  const resolved = rows.map((r) => {
+    const u = (r.key && byKey.get(r.key.toUpperCase())) || (r.name && byName.get(r.name)) || null;
+    if (!u) { missing.push(r.name || r.key); return null; }
+    matched.push(u.name);
+    return { user: u, rec: r };
+  }).filter(Boolean);
+
+  const delMonth = db.prepare("DELETE FROM shift_days WHERE day LIKE ?");
+  const delUser = db.prepare("DELETE FROM shift_days WHERE user_id=? AND day LIKE ?");
+  const ins = db.prepare('INSERT OR REPLACE INTO shift_days (user_id,day,start_hm,end_hm) VALUES (?,?,?,?)');
+  const updMeta = db.prepare('UPDATE users SET location=?, department=?, brand=? WHERE id=?');
+
+  let dayCount = 0;
+  db.transaction(() => {
+    if (mode === 'replace') delMonth.run(ym + '%');
+
+    for (const { user, rec } of resolved) {
+      if (mode !== 'replace') delUser.run(user.id, ym + '%');
+
+      // File cũng là nguồn cập nhật khu vực / bộ phận / brand nếu có ghi
+      const loc = LOCATIONS.includes(String(rec.location).toUpperCase())
+        ? String(rec.location).toUpperCase() : user.location;
+      const dep = DEPTS.includes(String(rec.department).toUpperCase())
+        ? String(rec.department).toUpperCase() : user.department;
+      const br = BRANDS.includes(String(rec.brand).toUpperCase())
+        ? String(rec.brand).toUpperCase() : user.brand;
+      updMeta.run(loc, dep, br, user.id);
+
+      for (const [day, t] of Object.entries(rec.days)) {
+        ins.run(user.id, day, t.start, t.end);
+        dayCount++;
+      }
+    }
+  })();
+
+  return { ym, mode, matched, missing, dayCount, errors: parsed.errors };
 }
 
-async function loadPunches() {
-  const r = await fetch('/api/punches?' + qp());
-  if (r.status === 401) return location.reload();
-  $('#pp').innerHTML = punchTable(await r.json(), false);
+/* Lịch tháng của một người, để hiển thị */
+function scheduleOf(userId, ym) {
+  return db.prepare('SELECT day, start_hm, end_hm FROM shift_days WHERE user_id=? AND day LIKE ? ORDER BY day')
+    .all(userId, ym + '%');
 }
 
-async function loadLate() {
-  const r = await fetch('/api/late?' + qp());
-  if (r.status === 401) return location.reload();
-  $('#pl').innerHTML = punchTable(await r.json(), true);
+/* Tổng quan lịch tháng cho quản trị */
+function scheduleSummary(ym) {
+  const rows = db.prepare(
+    `SELECT u.id, u.name, u.location, u.department, u.brand,
+            (SELECT COUNT(*) FROM shift_days s WHERE s.user_id=u.id AND s.day LIKE ?) work_days
+     FROM users u WHERE u.role='staff' AND u.is_active=1
+     ORDER BY u.location, u.department, u.name`
+  ).all(ym + '%');
+
+  const [y, mo] = ym.split('-').map(Number);
+  const dim = new Date(y, mo, 0).getDate();
+
+  return {
+    ym, days_in_month: dim,
+    rows: rows.map((r) => ({ ...r, off_days: dim - r.work_days, timezone: tzOf(r.location) })),
+    no_schedule: rows.filter((r) => r.work_days === 0).length,
+  };
 }
 
-/* ---------- Lịch off ---------- */
-let offYm = new Date().toISOString().slice(0, 7);
-let offQ = { filter: '', user_id: '', department: '', brand: '' };
+const allUsers = () =>
+  db.prepare(
+    `SELECT u.id,u.name,u.key,u.department,u.brand,u.location,u.role,u.is_active,
+            u.device_id,u.device_seen_at,
+            (SELECT COUNT(*) FROM shift_days s WHERE s.user_id=u.id AND s.day LIKE ?) work_days
+     FROM users u ORDER BY u.role DESC, u.location, u.department, u.name`
+  ).all(new Date().toISOString().slice(0, 7) + '%')
+    .map((u) => ({ ...u, bound: !!u.device_id, timezone: tzOf(u.location) }));
 
-function offReadFilters() {
-  document.querySelectorAll('[data-o]').forEach(el => {
-    const k = el.dataset.o;
-    if (k === 'filter2') return;              // ô "số ngày" ghi vào cùng khoá filter
-    offQ[k] = el.value;
-  });
-}
-function offSetDays(v) { offQ.filter = v; loadOffs(); }
-function offClear() { offQ = { filter: '', user_id: '', department: '', brand: '' }; loadOffs(); }
-
-async function loadOffs() {
-  if (document.querySelector('[data-o]')) offReadFilters();
-  const qs = new URLSearchParams({ ym: offYm, ...offQ });
-  const r = await fetch('/api/admin/offs?' + qs);
-  if (r.status === 401) return location.reload();
-  const d = await r.json();
-  const [y, m] = d.ym.split('-').map(Number);
-
-
-  const trs = d.rows.map(u => `<tr>
-    <td class="wide"><div style="font-weight:600">${esc(u.name)}</div>
-      <div style="margin-top:5px;display:inline-flex;gap:5px">
-        <span class="pill">${u.department || '—'}</span>
-        ${u.brand ? `<span class="pill pri">${u.brand}</span>` : ''}</div></td>
-    <td><span class="pill ${u.n === 0 ? 'red' : (u.n >= d.max ? 'pri' : 'amb')}">${u.n}/${d.max} ngày</span></td>
-    <td class="wide">${u.days.length
-      ? u.days.map(day => {
-          const bad = u.rejected.includes(day);
-          return `<button class="daytag ${bad ? 'bad' : ''}"
-            title="${bad ? 'Nguyện vọng này chưa được đáp ứng — lịch vẫn xếp ca. Bấm để bỏ.'
-                         : 'Bấm để bỏ ngày này'}"
-            onclick="admToggle(${u.id},'${day}')">${+day.slice(8)}<span>×</span></button>`;
-        }).join('')
-      : '<span class="sub">chưa đăng ký</span>'}</td>
-    <td>${!u.has_schedule ? '<span class="pill">chưa xếp lịch</span>'
-      : (u.rejected.length
-          ? `<span class="pill red">${u.rejected.length} ngày chưa đáp ứng</span>
-             <div class="sub" style="margin-top:4px">duyệt ${u.approved.length}/${u.n}</div>`
-          : `<span class="pill pri">duyệt đủ ${u.approved.length}</span>`)}</td>
-    <td style="text-align:right"><button class="btn btn-sm" onclick="admAdd(${u.id},'${esc(u.name)}')">Thêm ngày</button></td>
-  </tr>`).join('');
-
-  $('#po').innerHTML = `
-    <div class="offnav" style="padding:0 0 14px">
-      <button class="btn btn-sm" onclick="offMove(-1)">‹ Tháng trước</button>
-      <b style="font-size:17px">Tháng ${m}/${y}</b>
-      <button class="btn btn-sm" onclick="offMove(1)">Tháng sau ›</button>
-    </div>
-    <div class="card card-p" style="margin-bottom:16px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
-      <div style="flex:1;min-width:200px">
-        <div style="font-weight:700">${d.locked ? '🔒 Tháng này đang khóa' : 'Tháng này đang mở'}</div>
-        <div class="sub">${d.locked
-          ? 'Nhân viên không tự đăng ký hay bỏ ngày được. Quản trị vẫn chỉnh được.'
-          : `Nhân viên tự đăng ký, tối đa ${d.max} ngày.`}</div>
-      </div>
-      <button class="btn ${d.locked ? '' : 'btn-red'}" onclick="offLock(${d.locked ? 'false' : 'true'})">
-        ${d.locked ? 'Mở khóa tháng' : 'Khóa tháng'}</button>
-    </div>
-    <div class="card card-p" style="margin-bottom:16px;background:#FAFBFB">
-      <div class="sub" style="line-height:1.7">
-        <b style="color:var(--ink)">Quy trình:</b>
-        ① nhân viên đăng ký nguyện vọng nghỉ →
-        ② quản lý xem bảng này rồi xếp ca →
-        ③ nhập file lịch ở tab Nhân sự →
-        ④ khóa tháng để chốt.<br>
-        Cột <b>Đối chiếu lịch</b> so nguyện vọng với lịch đã nhập:
-        ngày nào xin nghỉ mà lịch vẫn xếp ca thì hiện đỏ${d.has_schedule ? ''
-          : ' — hiện chưa nhập lịch tháng này nên chưa đối chiếu được'}.
-      </div>
-    </div>
-    <div class="fil">
-      <div class="f"><label>Nhân viên</label>
-        <select data-o="user_id" onchange="loadOffs()"><option value="">Tất cả</option>
-          ${d.users.map(u => `<option value="${u.id}" ${offQ.user_id == u.id ? 'selected' : ''}>${esc(u.name)}</option>`).join('')}
-        </select></div>
-      <div class="f"><label>Bộ phận</label>
-        <select data-o="department" onchange="loadOffs()"><option value="">Tất cả</option>
-          ${d.departments.map(x => `<option ${offQ.department === x ? 'selected' : ''}>${x}</option>`).join('')}
-        </select></div>
-      <div class="f"><label>Brand</label>
-        <select data-o="brand" onchange="loadOffs()"><option value="">Tất cả</option>
-          ${d.brands.map(x => `<option ${offQ.brand === x ? 'selected' : ''}>${x}</option>`).join('')}
-        </select></div>
-      <div class="f" style="min-width:168px"><label>Trạng thái</label>
-        <select data-o="filter" onchange="loadOffs()">
-          <option value="">Tất cả · ${d.counts.all}</option>
-          <option value="none" ${offQ.filter === 'none' ? 'selected' : ''}>Chưa đăng ký · ${d.counts.none}</option>
-          <option value="partial" ${offQ.filter === 'partial' ? 'selected' : ''}>Chưa đủ ${d.max} ngày · ${d.counts.partial}</option>
-          <option value="full" ${offQ.filter === 'full' ? 'selected' : ''}>Đủ ${d.max} ngày · ${d.counts.full}</option>
-          ${d.has_schedule ? `<option value="conflict" ${offQ.filter === 'conflict' ? 'selected' : ''}>Chưa đáp ứng nguyện vọng · ${d.counts.conflict}</option>` : ''}
-        </select></div>
-      <div class="f" style="min-width:150px"><label>Số ngày đã đăng ký</label>
-        <select data-o="filter2" onchange="offSetDays(this.value)">
-          <option value="">Tất cả</option>
-          ${d.counts.byDays.map((n, i) => `<option value="${i + 1}" ${offQ.filter == String(i + 1) ? 'selected' : ''}
-            ${n ? '' : 'disabled'}>${i + 1} ngày · ${n} người</option>`).join('')}
-        </select></div>
-      <button class="btn btn-sm" onclick="offClear()">Xóa lọc</button>
-    </div>
-    <div class="tw"><table>
-      <thead><tr><th class="wide">Nhân viên</th><th>Đăng ký</th><th class="wide">Ngày xin nghỉ</th>
-        <th>Đối chiếu lịch</th><th style="text-align:right">Xử lý</th></tr></thead>
-      <tbody>${trs || '<tr><td colspan="5" class="empty">Không có ai khớp bộ lọc.</td></tr>'}</tbody>
-    </table></div>
-    <div class="sub" style="margin-top:10px">${d.rows.length} nhân viên</div>`;
+function audit(actor, action, detail, ip) {
+  db.prepare('INSERT INTO audit_log (actor_id,actor_name,action,detail,ip,at) VALUES (?,?,?,?,?,?)')
+    .run(actor ? actor.id : null, actor ? actor.name : null, action, detail, ip, now());
 }
 
-function offMove(delta) {
-  const [y, m] = offYm.split('-').map(Number);
-  const d = new Date(y, m - 1 + delta, 1);
-  offYm = `${d.getFullYear()}-${pad(d.getMonth() + 1)}`;
-  loadOffs();
-}
-
-async function offLock(locked) {
-  if (!confirm(locked ? `Khóa lịch off tháng ${offYm}? Nhân viên sẽ không tự sửa được.`
-                      : `Mở khóa tháng ${offYm}?`)) return;
-  const r = await api('/api/admin/offs/lock', { method: 'POST', body: { ym: offYm, locked } });
-  toast(r.ok ? 'Đã cập nhật' : 'Không cập nhật được', r.message || '', !!r.ok);
-  loadOffs();
-}
-
-async function admToggle(userId, day) {
-  const r = await api('/api/admin/offs/toggle', { method: 'POST', body: { user_id: userId, day } });
-  toast(r.ok ? 'Đã cập nhật' : 'Không cập nhật được', r.message || '', !!r.ok);
-  loadOffs();
-}
-
-async function admAdd(userId, name) {
-  const d = prompt(`Thêm ngày nghỉ cho ${name} (dạng ngày, ví dụ 15):`);
-  if (!d) return;
-  const day = `${offYm}-${pad(+d)}`;
-  admToggle(userId, day);
-}
-
-const PANES = { b:['tb','pb'], p:['tp','pp'], l:['tl','pl'], o:['to','po'], u:['tu','pu'] };
-function setTab(k) {
-  TAB = k;
-  Object.entries(PANES).forEach(([key, [btn, pane]]) => {
-    $('#' + btn).classList.toggle('on', key === k);
-    $('#' + pane).hidden = key !== k;
-  });
-  $('#exp').hidden = !(k === 'b' || k === 'p' || k === 'l');
-  if (k === 'b') renderBoard();
-  else if (k === 'p') loadPunches();
-  else if (k === 'l') loadLate();
-  else if (k === 'o') loadOffs();
-  else renderUsers();
-}
-Object.entries(PANES).forEach(([k, [btn]]) => $('#' + btn).addEventListener('click', () => setTab(k)));
-$('#exp').addEventListener('click', () => {
-  location.href = (TAB === 'b' ? '/api/admin/export.csv?' : '/api/punches/export.csv?')
-    + (TAB === 'l' ? new URLSearchParams({ ...Object.fromEntries(new URLSearchParams(qp())), only_late: 1 }) : qp());
-});
-
-function tick() {
-  if (!B || TAB !== 'b') return;
-  const byId = {};
-  B.lanes.forEach(c => { if (c.holder) byId[c.holder.id] = c.holder; });
-  document.querySelectorAll('[data-cd]').forEach(el => {
-    const h = byId[el.dataset.cd]; if (!h) return;
-    const l = leftOf(h);
-    el.textContent = clk(l);
-    const lane = el.closest('.lane');
-    if (lane && l < 0) { lane.classList.add('over'); lane.classList.remove('busy'); }
-  });
-  document.querySelectorAll('[data-fill]').forEach(el => {
-    const h = byId[el.dataset.fill]; if (h) el.style.width = pctOf(h) + '%';
-  });
-}
-
-load();
-setInterval(tick, 1000);
-setInterval(load, 20000);
-</script>
-</body>
-</html>
+module.exports = {
+  db, DEPTS, BRANDS, AUTO_CLOSE_GRACE_MIN, newKey,
+  types, typeByCode, sweepStale, openFor, holderOf, lanes, present,
+  startActivity, stopActivity, stateFor, history, allUsers, audit, lockKey,
+  PUNCH_KINDS, LATE_LEVELS, MAX_OFF_PER_MONTH,
+  punch, shiftToday, punchHistory, scheduledFor,
+  myOffs, toggleOff, offSummary, setLock, isLocked, whoOff, MAX_OFF_PER_DAY_DEPT,
+  LOCATIONS, LOCATION_TZ, tzOf, zonedToUtc, dayInTz, shiftWindow,
+  applySchedule, scheduleOf, scheduleSummary,
+};
