@@ -218,6 +218,14 @@ function renderUsers() {
         ${u.is_active ? '' : '<span class="pill red">Đã khóa</span>'}</div></td>
     <td><div class="keybox"><code>${u.key}</code>
       <button class="btn btn-sm" onclick="copyLink('${u.key}','${esc(u.name).replace(/'/g,"\\'")}')">Chép link</button></div></td>
+    <td><select style="width:auto;min-width:92px" onchange="setLoc(${u.id},this.value)">
+        <option value="VN" ${u.location === 'VN' ? 'selected' : ''}>VN</option>
+        <option value="ARM" ${u.location === 'ARM' ? 'selected' : ''}>ARM</option>
+      </select>
+      <div class="sub" style="margin-top:4px">${u.timezone || ''}</div></td>
+    <td>${u.work_days
+      ? `<span class="pill pri">${u.work_days} ngày</span>`
+      : '<span class="pill red">chưa có lịch</span>'}</td>
     <td>${u.bound
       ? `<span class="pill pri"><span class="dot"></span>Đã gắn máy</span>
          <div class="sub" style="margin-top:4px">${dmy(u.device_seen_at)}</div>`
@@ -233,6 +241,28 @@ function renderUsers() {
   const brOpts = '<option value="">—</option>' + B.brands.map(b => `<option>${b}</option>`).join('');
 
   $('#pu').innerHTML = `
+    <div class="card card-p" style="margin-bottom:12px">
+      <div style="font-size:11.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--tx3);margin-bottom:10px">
+        Nhập lịch ca tháng từ Excel / CSV</div>
+      <div class="row">
+        <div class="f" style="max-width:170px"><label>Tháng áp dụng</label>
+          <input type="month" id="schYm" value="${new Date().toISOString().slice(0, 7)}"></div>
+        <div class="f"><label>File lịch</label><input type="file" id="schFile" accept=".xlsx,.xls,.csv"></div>
+        <button class="btn" onclick="schImport('preview')">Xem trước</button>
+        <button class="btn btn-pri" onclick="schImport('merge')">Merge</button>
+        <button class="btn btn-red" onclick="schImport('replace')">Ghi đè tháng</button>
+      </div>
+      <div id="schOut" class="sub" style="margin-top:10px;line-height:1.6"></div>
+      <div class="note" style="font-size:12.5px;color:var(--tx3);margin-top:8px;line-height:1.55">
+        Một dòng một người, mỗi ngày trong tháng một cột:
+        <span class="mono">Ma | Ten | KhuVuc | BoPhan | Brand | 1 | 2 | … | 31</span>.
+        Ô ghi <span class="mono">08:00-16:00</span>, để trống hoặc <span class="mono">OFF</span> là nghỉ.
+        Giờ trong file là <b>giờ địa phương</b> của người đó — KhuVuc <span class="mono">VN</span> hay
+        <span class="mono">ARM</span> quyết định múi giờ. Dùng chung được file của bot Telegram,
+        chỉ cần đổi cột TelegramID thành cột <span class="mono">Ma</span>.
+      </div>
+    </div>
+
     <div class="card card-p" style="margin-bottom:12px">
       <div class="row">
         <div class="f"><label>Tên nhân viên</label><input id="nn" placeholder="Nguyễn Thu Hà"></div>
@@ -252,12 +282,51 @@ Trần Minh Anh | CS | AE
     </div>
 
     <div class="tw"><table>
-      <thead><tr><th class="wide">Nhân viên</th><th>Link vào ca</th><th>Thiết bị</th>
-        <th style="text-align:right">Xử lý</th></tr></thead>
-      <tbody>${trs || '<tr><td colspan="4" class="empty">Chưa có nhân viên nào.</td></tr>'}</tbody>
+      <thead><tr><th class="wide">Nhân viên</th><th>Link vào ca</th><th>Khu vực</th>
+        <th>Lịch tháng này</th><th>Thiết bị</th><th style="text-align:right">Xử lý</th></tr></thead>
+      <tbody>${trs || '<tr><td colspan="6" class="empty">Chưa có nhân viên nào.</td></tr>'}</tbody>
     </table></div>
     <div class="sub" style="margin-top:10px">${staff.length} nhân viên · gửi link cho từng người một lần,
       họ lưu vào màn hình chính là xong</div>`;
+}
+
+async function schImport(mode) {
+  const f = $('#schFile').files[0];
+  const ym = $('#schYm').value;
+  if (!f) return toast('Chưa chọn file', 'Chọn file .xlsx hoặc .csv trước.', false);
+  if (!ym) return toast('Chưa chọn tháng', 'Cần tháng áp dụng.', false);
+  if (mode === 'replace' && !confirm(`Ghi đè toàn bộ lịch tháng ${ym}? Lịch cũ của MỌI người trong tháng này sẽ bị xoá.`)) return;
+
+  const out = $('#schOut');
+  out.textContent = 'Đang đọc file…';
+
+  const r = await fetch(`/api/admin/schedule/import?ym=${ym}&mode=${mode}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: f,
+  }).then(x => x.json()).catch(() => ({ ok: false, message: 'Lỗi mạng.' }));
+
+  if (!r.ok) { out.innerHTML = `<b style="color:var(--red)">${esc(r.message || 'Không đọc được file.')}</b>`; return; }
+
+  const parts = [];
+  if (r.preview) {
+    parts.push(`<b>Xem trước tháng ${r.ym}:</b> ${r.count} người · ${r.dayCount} ngày làm.`);
+    if (r.matched.length) parts.push(`Khớp: ${r.matched.slice(0, 10).map(esc).join(', ')}${r.matched.length > 10 ? '…' : ''}`);
+  } else {
+    parts.push(`<b style="color:var(--pri)">${esc(r.message)}</b>`);
+    toast('Đã áp lịch', r.message, true);
+  }
+  if (r.missing && r.missing.length)
+    parts.push(`<b style="color:var(--red)">Không tìm thấy ${r.missing.length} người trong danh sách:</b> ${r.missing.map(esc).join(', ')} — thêm họ vào bên dưới rồi nhập lại.`);
+  if (r.errors && r.errors.length)
+    parts.push(`<b style="color:var(--amb)">${r.errors.length} ô có vấn đề (đã coi là nghỉ):</b><br>${r.errors.slice(0, 6).map(esc).join('<br>')}${r.errors.length > 6 ? '<br>…' : ''}`);
+
+  out.innerHTML = parts.join('<br>');
+  if (!r.preview) load();
+}
+
+async function setLoc(id, location) {
+  const r = await api(`/api/admin/users/${id}/location`, { method: 'PUT', body: { location } });
+  toast(r.ok ? 'Đã đổi khu vực' : 'Không đổi được', r.message || '', !!r.ok);
+  load();
 }
 
 async function copyLink(key, name) {
@@ -407,9 +476,19 @@ async function loadOffs() {
         ${u.brand ? `<span class="pill pri">${u.brand}</span>` : ''}</div></td>
     <td><span class="pill ${u.n === 0 ? 'red' : (u.n >= d.max ? 'pri' : 'amb')}">${u.n}/${d.max} ngày</span></td>
     <td class="wide">${u.days.length
-      ? u.days.map(day => `<button class="daytag" title="Bấm để bỏ ngày này"
-          onclick="admToggle(${u.id},'${day}')">${+day.slice(8)}<span>×</span></button>`).join('')
+      ? u.days.map(day => {
+          const bad = u.rejected.includes(day);
+          return `<button class="daytag ${bad ? 'bad' : ''}"
+            title="${bad ? 'Nguyện vọng này chưa được đáp ứng — lịch vẫn xếp ca. Bấm để bỏ.'
+                         : 'Bấm để bỏ ngày này'}"
+            onclick="admToggle(${u.id},'${day}')">${+day.slice(8)}<span>×</span></button>`;
+        }).join('')
       : '<span class="sub">chưa đăng ký</span>'}</td>
+    <td>${!u.has_schedule ? '<span class="pill">chưa xếp lịch</span>'
+      : (u.rejected.length
+          ? `<span class="pill red">${u.rejected.length} ngày chưa đáp ứng</span>
+             <div class="sub" style="margin-top:4px">duyệt ${u.approved.length}/${u.n}</div>`
+          : `<span class="pill pri">duyệt đủ ${u.approved.length}</span>`)}</td>
     <td style="text-align:right"><button class="btn btn-sm" onclick="admAdd(${u.id},'${esc(u.name)}')">Thêm ngày</button></td>
   </tr>`).join('');
 
@@ -429,11 +508,24 @@ async function loadOffs() {
       <button class="btn ${d.locked ? '' : 'btn-red'}" onclick="offLock(${d.locked ? 'false' : 'true'})">
         ${d.locked ? 'Mở khóa tháng' : 'Khóa tháng'}</button>
     </div>
+    <div class="card card-p" style="margin-bottom:16px;background:#FAFBFB">
+      <div class="sub" style="line-height:1.7">
+        <b style="color:var(--ink)">Quy trình:</b>
+        ① nhân viên đăng ký nguyện vọng nghỉ →
+        ② quản lý xem bảng này rồi xếp ca →
+        ③ nhập file lịch ở tab Nhân sự →
+        ④ khóa tháng để chốt.<br>
+        Cột <b>Đối chiếu lịch</b> so nguyện vọng với lịch đã nhập:
+        ngày nào xin nghỉ mà lịch vẫn xếp ca thì hiện đỏ${d.has_schedule ? ''
+          : ' — hiện chưa nhập lịch tháng này nên chưa đối chiếu được'}.
+      </div>
+    </div>
     <div class="chips">
       ${chip('', 'Tất cả', d.counts.all)}
       ${chip('none', 'Chưa đăng ký', d.counts.none)}
       ${chip('partial', 'Chưa đủ', d.counts.partial)}
       ${chip('full', `Đủ ${d.max} ngày`, d.counts.full)}
+      ${d.has_schedule ? chip('conflict', 'Chưa đáp ứng', d.counts.conflict) : ''}
       <select style="width:auto;min-width:150px" onchange="offFilter=this.value;loadOffs()">
         <option value="">— Chọn số ngày —</option>
         ${d.counts.byDays.map((n, i) => `<option value="${i + 1}" ${offFilter == String(i + 1) ? 'selected' : ''}
@@ -441,9 +533,9 @@ async function loadOffs() {
       </select>
     </div>
     <div class="tw"><table>
-      <thead><tr><th class="wide">Nhân viên</th><th>Đã đăng ký</th><th class="wide">Ngày nghỉ</th>
-        <th style="text-align:right">Xử lý</th></tr></thead>
-      <tbody>${trs || '<tr><td colspan="4" class="empty">Không có ai khớp bộ lọc.</td></tr>'}</tbody>
+      <thead><tr><th class="wide">Nhân viên</th><th>Đăng ký</th><th class="wide">Ngày xin nghỉ</th>
+        <th>Đối chiếu lịch</th><th style="text-align:right">Xử lý</th></tr></thead>
+      <tbody>${trs || '<tr><td colspan="5" class="empty">Không có ai khớp bộ lọc.</td></tr>'}</tbody>
     </table></div>
     <div class="sub" style="margin-top:10px">${d.rows.length} nhân viên</div>`;
 }
