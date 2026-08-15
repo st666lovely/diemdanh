@@ -1,11 +1,17 @@
 'use strict';
 
+// PHẢI đặt trước mọi require khác. Máy chủ Render chạy theo UTC, nên nếu không ép
+// múi giờ thì giờ ca "09:00" bị hiểu là 09:00 UTC = 16:00 giờ Việt Nam, và mọi
+// phép tính trễ đều lệch 7 tiếng. Đặt sớm để Node chưa kịp ghi nhớ múi giờ cũ.
+process.env.TZ = process.env.TZ || 'Asia/Ho_Chi_Minh';
+
 const path = require('path');
 const crypto = require('crypto');
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const cookieSession = require('cookie-session');
 const D = require('./db');
+const { parseScheduleFile } = require('./schedule');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -124,6 +130,7 @@ app.get('/api/state', requireUser, (req, res) => {
     ...D.stateFor(req.user),
     shift: D.shiftToday(req.user),
     offs: D.myOffs(req.user, ym),
+    schedule: D.scheduleOf(req.user.id, ym),
   });
 });
 
@@ -370,17 +377,73 @@ app.post('/api/admin/offs/lock', requireUser, requireAdmin, (req, res) => {
   res.json(r);
 });
 
-/* --- Giờ ca của nhân viên, dùng để tính trễ --- */
-app.put('/api/admin/users/:id/shift', requireUser, requireAdmin, (req, res) => {
-  const b = req.body || {};
-  const re = /^([01]\d|2[0-3]):[0-5]\d$/;
-  if (!re.test(b.shift_start || '') || !re.test(b.shift_end || '')) {
-    return res.status(400).json({ ok: false, message: 'Giờ phải theo dạng HH:MM, ví dụ 09:00.' });
+/* --- Nhập lịch ca tháng từ file Excel/CSV ---
+   Gửi thẳng file trong body (không dùng multipart) cho gọn.
+   Tháng áp dụng và cách áp nằm ở query: ?ym=2026-08&mode=merge|replace|preview */
+app.post('/api/admin/schedule/import',
+  requireUser, requireAdmin,
+  express.raw({ type: () => true, limit: '8mb' }),   // nhận mọi kiểu, kể cả khi thiếu Content-Type
+  (req, res) => {
+    const ym = String(req.query.ym || '');
+    const mode = ['merge', 'replace', 'preview'].includes(req.query.mode) ? req.query.mode : 'preview';
+
+    if (!Buffer.isBuffer(req.body) || !req.body.length) {
+      return res.status(400).json({ ok: false, message: 'Không nhận được file.' });
+    }
+
+    let parsed;
+    try {
+      parsed = parseScheduleFile(req.body, ym);
+    } catch (e) {
+      return res.status(400).json({ ok: false, message: 'Không đọc được file: ' + e.message });
+    }
+    if (!parsed.count) {
+      return res.status(400).json({ ok: false, message: parsed.errors[0] || 'File không có dòng nào hợp lệ.', errors: parsed.errors });
+    }
+
+    // Xem trước: đối chiếu với danh sách nhân sự, chưa ghi gì vào database
+    if (mode === 'preview') {
+      const names = parsed.rows.map((r) => r.name || r.key);
+      const known = D.allUsers().filter((u) => u.role === 'staff');
+      const missing = parsed.rows.filter((r) =>
+        !known.some((u) => (r.key && u.key === r.key.toUpperCase()) || (r.name && u.name === r.name))
+      ).map((r) => r.name || r.key);
+
+      const dayCount = parsed.rows.reduce((n, r) => n + Object.keys(r.days).length, 0);
+      return res.json({
+        ok: true, preview: true, ym: parsed.ym, count: parsed.count, dayCount,
+        matched: names.filter((n) => !missing.includes(n)), missing, errors: parsed.errors,
+      });
+    }
+
+    const r = D.applySchedule(parsed, mode);
+    D.audit(req.user, 'schedule_import', `${r.ym} ${mode} ${r.matched.length} người / ${r.dayCount} ngày`, req.ip);
+
+    res.json({
+      ok: true, ...r,
+      message: `Đã áp lịch tháng ${r.ym} (${mode === 'replace' ? 'ghi đè' : 'merge'}): `
+        + `${r.matched.length} người, ${r.dayCount} ngày làm.`
+        + (r.missing.length ? ` Không khớp ${r.missing.length} người: ${r.missing.slice(0, 5).join(', ')}.` : ''),
+    });
+  });
+
+/* --- Xem lịch tháng đã nhập --- */
+app.get('/api/admin/schedule', requireUser, requireAdmin, (req, res) => {
+  const ym = String(req.query.ym || new Date().toISOString().slice(0, 7));
+  const out = D.scheduleSummary(ym);
+  if (req.query.user_id) out.detail = D.scheduleOf(+req.query.user_id, ym);
+  res.json(out);
+});
+
+/* --- Đổi khu vực (múi giờ) của nhân viên --- */
+app.put('/api/admin/users/:id/location', requireUser, requireAdmin, (req, res) => {
+  const loc = String((req.body || {}).location || '').toUpperCase();
+  if (!D.LOCATIONS.includes(loc)) {
+    return res.status(400).json({ ok: false, message: 'Khu vực phải là ' + D.LOCATIONS.join(' hoặc ') + '.' });
   }
-  D.db.prepare('UPDATE users SET shift_start=?, shift_end=? WHERE id=?')
-    .run(b.shift_start, b.shift_end, +req.params.id);
-  D.audit(req.user, 'shift_update', `#${req.params.id} ${b.shift_start}-${b.shift_end}`, req.ip);
-  res.json({ ok: true, message: 'Đã đổi giờ ca.', users: D.allUsers() });
+  D.db.prepare('UPDATE users SET location=? WHERE id=?').run(loc, +req.params.id);
+  D.audit(req.user, 'location_update', `#${req.params.id} -> ${loc}`, req.ip);
+  res.json({ ok: true, message: `Đã đổi khu vực sang ${loc} (${D.tzOf(loc)}).`, users: D.allUsers() });
 });
 
 /* ============================================================
@@ -395,4 +458,8 @@ setInterval(() => {
   try { D.sweepStale(); } catch (e) { console.error('sweep lỗi:', e.message); }
 }, 60000);
 
-app.listen(PORT, () => console.log(`Trạm trực đang chạy tại cổng ${PORT}`));
+app.listen(PORT, () => {
+  const d = new Date();
+  console.log(`Trạm trực đang chạy tại cổng ${PORT}`);
+  console.log(`[giờ] Múi giờ: ${process.env.TZ} · giờ máy chủ hiện tại: ${d.toLocaleString('vi-VN')}`);
+});
