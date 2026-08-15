@@ -44,9 +44,15 @@
     </div>
     <div class="tabs">
       <button id="tb" class="on">Theo dõi</button>
+      <button id="tp">Chấm công</button>
+      <button id="tl">Trễ</button>
+      <button id="to">Lịch off</button>
       <button id="tu">Nhân sự</button>
     </div>
     <div id="pb"></div>
+    <div id="pp" hidden></div>
+    <div id="pl" hidden></div>
+    <div id="po" hidden></div>
     <div id="pu" hidden></div>
   </div>
 </div>
@@ -299,15 +305,196 @@ async function lockU(id) {
 }
 
 /* ---------- Khung ---------- */
-$('#tb').addEventListener('click', function () {
-  TAB = 'b'; this.classList.add('on'); $('#tu').classList.remove('on');
-  $('#pb').hidden = false; $('#pu').hidden = true; renderBoard();
+/* ---------- Bộ lọc dùng chung cho tab Chấm công / Trễ ---------- */
+function qp() {
+  const p = new URLSearchParams();
+  ['user_id','kind','department','brand','from','to','late_level'].forEach(k => {
+    const el = document.querySelector(`[data-p="${k}"]`);
+    if (el && el.value) p.set(k, el.value);
+  });
+  return p.toString();
+}
+
+const KIND_PILL = { in: 'pri', out: 'amb', log: '' };
+
+function punchTable(d, showLateFilter) {
+  const sel = (k, o, ph) => `<select data-p="${k}" onchange="${showLateFilter ? 'loadLate()' : 'loadPunches()'}">
+    <option value="">${ph}</option>${o}</select>`;
+
+  const trs = d.rows.map(r => `<tr>
+    <td class="wide"><div style="font-weight:600">${esc(r.user_name)}</div>
+      <div style="margin-top:5px;display:inline-flex;gap:5px">
+        <span class="pill">${r.department || '—'}</span>
+        ${r.brand ? `<span class="pill pri">${r.brand}</span>` : ''}</div></td>
+    <td><span class="pill ${KIND_PILL[r.kind]}">${r.kind_label}</span></td>
+    <td>${dmy(r.actual_at)}<div class="sub">${hms(r.actual_at)}</div></td>
+    <td class="sub">${r.scheduled_at ? hms(r.scheduled_at) : '—'}</td>
+    <td>${r.late_label
+      ? `<span class="pill ${r.late_level === 'in5' ? 'amb' : 'red'}">${r.late_label}</span>
+         <div class="sub" style="margin-top:4px">${r.late_minutes} phút</div>`
+      : '<span class="pill pri">Đúng giờ</span>'}</td>
+    <td class="sub">${r.ip || '—'}</td></tr>`).join('');
+
+  return `
+    <div class="kpis">
+      <div class="kpi"><div class="n">${d.stats.total}</div><div class="l">Lượt khớp bộ lọc</div></div>
+      <div class="kpi amb"><div class="n">${d.stats.in5}</div><div class="l">Trễ lên ca ~5p</div></div>
+      <div class="kpi red"><div class="n">${d.stats.in30}</div><div class="l">Trễ lên ca ~30p</div></div>
+      <div class="kpi red"><div class="n">${d.stats.out60}</div><div class="l">Trễ xuống ca ~60p</div></div>
+    </div>
+    <div class="fil">
+      ${d.is_admin ? `<div class="f"><label>Nhân viên</label>${sel('user_id',
+        d.users.map(u => `<option value="${u.id}">${esc(u.name)}</option>`).join(''), 'Tất cả')}</div>` : ''}
+      ${showLateFilter
+        ? `<div class="f"><label>Mức trễ</label>${sel('late_level',
+            Object.entries(d.levels).map(([k, v]) => `<option value="${k}">${v.label}</option>`).join(''), 'Tất cả')}</div>`
+        : `<div class="f"><label>Loại</label>${sel('kind',
+            Object.entries(d.kinds).map(([k, v]) => `<option value="${k}">${v}</option>`).join(''), 'Tất cả')}</div>`}
+      <div class="f"><label>Bộ phận</label>${sel('department',
+        d.departments.map(x => `<option>${x}</option>`).join(''), 'Tất cả')}</div>
+      <div class="f"><label>Brand</label>${sel('brand',
+        d.brands.map(x => `<option>${x}</option>`).join(''), 'Tất cả')}</div>
+      <div class="f"><label>Từ ngày</label><input type="date" data-p="from"
+        onchange="${showLateFilter ? 'loadLate()' : 'loadPunches()'}"></div>
+      <div class="f"><label>Đến ngày</label><input type="date" data-p="to"
+        onchange="${showLateFilter ? 'loadLate()' : 'loadPunches()'}"></div>
+      <button class="btn btn-sm" onclick="clearP('${showLateFilter ? 'l' : 'p'}')">Xóa lọc</button>
+    </div>
+    <div class="tw"><table>
+      <thead><tr><th class="wide">Nhân viên</th><th>Loại</th><th>Giờ bấm</th><th>Theo lịch</th>
+        <th>Mức trễ</th><th>IP</th></tr></thead>
+      <tbody>${trs || `<tr><td colspan="6" class="empty">${showLateFilter
+        ? 'Không có ai trễ theo bộ lọc này.' : 'Chưa có bản ghi chấm công nào.'}</td></tr>`}</tbody>
+    </table></div>
+    <div class="sub" style="margin-top:10px">${d.rows.length} bản ghi hiển thị</div>`;
+}
+
+function clearP(which) {
+  document.querySelectorAll('[data-p]').forEach(e => e.value = '');
+  which === 'l' ? loadLate() : loadPunches();
+}
+
+async function loadPunches() {
+  const r = await fetch('/api/punches?' + qp());
+  if (r.status === 401) return location.reload();
+  $('#pp').innerHTML = punchTable(await r.json(), false);
+}
+
+async function loadLate() {
+  const r = await fetch('/api/late?' + qp());
+  if (r.status === 401) return location.reload();
+  $('#pl').innerHTML = punchTable(await r.json(), true);
+}
+
+/* ---------- Lịch off ---------- */
+let offYm = new Date().toISOString().slice(0, 7);
+let offFilter = '';
+
+async function loadOffs() {
+  const r = await fetch(`/api/admin/offs?ym=${offYm}&filter=${offFilter}`);
+  if (r.status === 401) return location.reload();
+  const d = await r.json();
+  const [y, m] = d.ym.split('-').map(Number);
+
+  const chip = (v, label, n) =>
+    `<button class="chip ${offFilter === v ? 'on' : ''}" onclick="offFilter='${v}';loadOffs()">
+      ${label}${n !== undefined ? ` <b>${n}</b>` : ''}</button>`;
+
+  const trs = d.rows.map(u => `<tr>
+    <td class="wide"><div style="font-weight:600">${esc(u.name)}</div>
+      <div style="margin-top:5px;display:inline-flex;gap:5px">
+        <span class="pill">${u.department || '—'}</span>
+        ${u.brand ? `<span class="pill pri">${u.brand}</span>` : ''}</div></td>
+    <td><span class="pill ${u.n === 0 ? 'red' : (u.n >= d.max ? 'pri' : 'amb')}">${u.n}/${d.max} ngày</span></td>
+    <td class="wide">${u.days.length
+      ? u.days.map(day => `<button class="daytag" title="Bấm để bỏ ngày này"
+          onclick="admToggle(${u.id},'${day}')">${+day.slice(8)}<span>×</span></button>`).join('')
+      : '<span class="sub">chưa đăng ký</span>'}</td>
+    <td style="text-align:right"><button class="btn btn-sm" onclick="admAdd(${u.id},'${esc(u.name)}')">Thêm ngày</button></td>
+  </tr>`).join('');
+
+  $('#po').innerHTML = `
+    <div class="offnav" style="padding:0 0 14px">
+      <button class="btn btn-sm" onclick="offMove(-1)">‹ Tháng trước</button>
+      <b style="font-size:17px">Tháng ${m}/${y}</b>
+      <button class="btn btn-sm" onclick="offMove(1)">Tháng sau ›</button>
+    </div>
+    <div class="card card-p" style="margin-bottom:16px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+      <div style="flex:1;min-width:200px">
+        <div style="font-weight:700">${d.locked ? '🔒 Tháng này đang khóa' : 'Tháng này đang mở'}</div>
+        <div class="sub">${d.locked
+          ? 'Nhân viên không tự đăng ký hay bỏ ngày được. Quản trị vẫn chỉnh được.'
+          : `Nhân viên tự đăng ký, tối đa ${d.max} ngày.`}</div>
+      </div>
+      <button class="btn ${d.locked ? '' : 'btn-red'}" onclick="offLock(${d.locked ? 'false' : 'true'})">
+        ${d.locked ? 'Mở khóa tháng' : 'Khóa tháng'}</button>
+    </div>
+    <div class="chips">
+      ${chip('', 'Tất cả', d.counts.all)}
+      ${chip('none', 'Chưa đăng ký', d.counts.none)}
+      ${chip('partial', 'Chưa đủ', d.counts.partial)}
+      ${chip('full', `Đủ ${d.max} ngày`, d.counts.full)}
+      <select style="width:auto;min-width:150px" onchange="offFilter=this.value;loadOffs()">
+        <option value="">— Chọn số ngày —</option>
+        ${d.counts.byDays.map((n, i) => `<option value="${i + 1}" ${offFilter == String(i + 1) ? 'selected' : ''}
+          ${n ? '' : 'disabled'}>${i + 1} ngày${n ? ` · ${n} người` : ' · không có ai'}</option>`).join('')}
+      </select>
+    </div>
+    <div class="tw"><table>
+      <thead><tr><th class="wide">Nhân viên</th><th>Đã đăng ký</th><th class="wide">Ngày nghỉ</th>
+        <th style="text-align:right">Xử lý</th></tr></thead>
+      <tbody>${trs || '<tr><td colspan="4" class="empty">Không có ai khớp bộ lọc.</td></tr>'}</tbody>
+    </table></div>
+    <div class="sub" style="margin-top:10px">${d.rows.length} nhân viên</div>`;
+}
+
+function offMove(delta) {
+  const [y, m] = offYm.split('-').map(Number);
+  const d = new Date(y, m - 1 + delta, 1);
+  offYm = `${d.getFullYear()}-${pad(d.getMonth() + 1)}`;
+  loadOffs();
+}
+
+async function offLock(locked) {
+  if (!confirm(locked ? `Khóa lịch off tháng ${offYm}? Nhân viên sẽ không tự sửa được.`
+                      : `Mở khóa tháng ${offYm}?`)) return;
+  const r = await api('/api/admin/offs/lock', { method: 'POST', body: { ym: offYm, locked } });
+  toast(r.ok ? 'Đã cập nhật' : 'Không cập nhật được', r.message || '', !!r.ok);
+  loadOffs();
+}
+
+async function admToggle(userId, day) {
+  const r = await api('/api/admin/offs/toggle', { method: 'POST', body: { user_id: userId, day } });
+  toast(r.ok ? 'Đã cập nhật' : 'Không cập nhật được', r.message || '', !!r.ok);
+  loadOffs();
+}
+
+async function admAdd(userId, name) {
+  const d = prompt(`Thêm ngày nghỉ cho ${name} (dạng ngày, ví dụ 15):`);
+  if (!d) return;
+  const day = `${offYm}-${pad(+d)}`;
+  admToggle(userId, day);
+}
+
+const PANES = { b:['tb','pb'], p:['tp','pp'], l:['tl','pl'], o:['to','po'], u:['tu','pu'] };
+function setTab(k) {
+  TAB = k;
+  Object.entries(PANES).forEach(([key, [btn, pane]]) => {
+    $('#' + btn).classList.toggle('on', key === k);
+    $('#' + pane).hidden = key !== k;
+  });
+  $('#exp').hidden = !(k === 'b' || k === 'p' || k === 'l');
+  if (k === 'b') renderBoard();
+  else if (k === 'p') loadPunches();
+  else if (k === 'l') loadLate();
+  else if (k === 'o') loadOffs();
+  else renderUsers();
+}
+Object.entries(PANES).forEach(([k, [btn]]) => $('#' + btn).addEventListener('click', () => setTab(k)));
+$('#exp').addEventListener('click', () => {
+  location.href = (TAB === 'b' ? '/api/admin/export.csv?' : '/api/punches/export.csv?')
+    + (TAB === 'l' ? new URLSearchParams({ ...Object.fromEntries(new URLSearchParams(qp())), only_late: 1 }) : qp());
 });
-$('#tu').addEventListener('click', function () {
-  TAB = 'u'; this.classList.add('on'); $('#tb').classList.remove('on');
-  $('#pb').hidden = true; $('#pu').hidden = false; renderUsers();
-});
-$('#exp').addEventListener('click', () => { location.href = '/api/admin/export.csv?' + q(); });
 
 function tick() {
   if (!B || TAB !== 'b') return;
