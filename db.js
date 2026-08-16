@@ -554,7 +554,10 @@ function punchHistory(f = {}, viewer = null) {
     `SELECT COUNT(*) total,
             SUM(CASE WHEN p.late_level='in5'   THEN 1 ELSE 0 END) a,
             SUM(CASE WHEN p.late_level='in30'  THEN 1 ELSE 0 END) b,
-            SUM(CASE WHEN p.late_level='out60' THEN 1 ELSE 0 END) c
+            SUM(CASE WHEN p.late_level='out60' THEN 1 ELSE 0 END) c,
+            SUM(CASE WHEN p.kind='in'  THEN 1 ELSE 0 END) k_in,
+            SUM(CASE WHEN p.kind='out' THEN 1 ELSE 0 END) k_out,
+            SUM(CASE WHEN p.kind='log' THEN 1 ELSE 0 END) k_log
      FROM punches p ${where}`).get(...p);
 
   return {
@@ -569,6 +572,47 @@ function punchHistory(f = {}, viewer = null) {
     stats: {
       total: s.total || 0, in5: s.a || 0, in30: s.b || 0, out60: s.c || 0,
       late: (s.a || 0) + (s.b || 0) + (s.c || 0),
+      kind_in: s.k_in || 0, kind_out: s.k_out || 0, kind_log: s.k_log || 0,
+    },
+  };
+}
+
+/* Tổng hợp trễ THEO NGƯỜI — thứ quản lý cần ở mục này, thay vì nhật ký từng lượt.
+   Xếp theo mức nghiêm trọng: trễ nặng trước, rồi tới tổng số phút. */
+function lateByUser(f = {}, scope = null) {
+  const w = ['p.late_level IS NOT NULL'], p = [];
+  if (scope !== null)  { w.push('p.brand=?');       p.push(scope); }
+  if (f.user_id)       { w.push('p.user_id=?');     p.push(f.user_id); }
+  if (f.department)    { w.push('p.department=?');  p.push(f.department); }
+  if (f.brand)         { w.push('p.brand=?');       p.push(f.brand); }
+  if (f.late_level)    { w.push('p.late_level=?');  p.push(f.late_level); }
+  if (f.from)          { w.push('p.actual_at>=?');  p.push(new Date(f.from + 'T00:00:00').getTime()); }
+  if (f.to)            { w.push('p.actual_at<=?');  p.push(new Date(f.to + 'T23:59:59').getTime()); }
+
+  const where = 'WHERE ' + w.join(' AND ');
+  const rows = db.prepare(
+    `SELECT u.id, u.name user_name, p.department, p.brand,
+            COUNT(*) times,
+            SUM(p.late_minutes) total_minutes,
+            MAX(p.late_minutes) worst_minutes,
+            MAX(p.actual_at) last_at,
+            SUM(CASE WHEN p.late_level='in5'   THEN 1 ELSE 0 END) in5,
+            SUM(CASE WHEN p.late_level='in30'  THEN 1 ELSE 0 END) in30,
+            SUM(CASE WHEN p.late_level='out60' THEN 1 ELSE 0 END) out60
+     FROM punches p JOIN users u ON u.id=p.user_id
+     ${where}
+     GROUP BY u.id, p.department, p.brand
+     ORDER BY (SUM(CASE WHEN p.late_level='in30' THEN 1 ELSE 0 END)
+             + SUM(CASE WHEN p.late_level='out60' THEN 1 ELSE 0 END)) DESC,
+              SUM(p.late_minutes) DESC`).all(...p);
+
+  return {
+    rows,
+    stats: {
+      people: rows.length,
+      times: rows.reduce((n, r) => n + r.times, 0),
+      minutes: rows.reduce((n, r) => n + r.total_minutes, 0),
+      heavy: rows.reduce((n, r) => n + r.in30 + r.out60, 0),
     },
   };
 }
@@ -825,7 +869,7 @@ module.exports = {
   types, typeByCode, sweepStale, openFor, holderOf, lanes, present,
   startActivity, stopActivity, stateFor, history, allUsers, audit, lockKey,
   PUNCH_KINDS, LATE_LEVELS, MAX_OFF_PER_MONTH,
-  punch, shiftToday, punchHistory, scheduledFor,
+  punch, shiftToday, punchHistory, lateByUser, scheduledFor,
   myOffs, toggleOff, offSummary, setLock, isLocked, whoOff, MAX_OFF_PER_DAY_DEPT,
   LOCATIONS, LOCATION_TZ, tzOf, zonedToUtc, dayInTz, shiftWindow,
   scopeOf, isSuper, inScope,
