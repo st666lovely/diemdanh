@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS users (
   key            TEXT    NOT NULL UNIQUE,   -- link vào ca: /k/<key>
   department     TEXT,
   brand          TEXT,
-  role           TEXT    NOT NULL DEFAULT 'staff',   -- staff | admin
+  role           TEXT    NOT NULL DEFAULT 'staff',   -- staff | admin (theo brand) | super (cả hai)
   password_hash  TEXT,                      -- chỉ admin
   username       TEXT UNIQUE,               -- chỉ admin
   device_id      TEXT,                      -- gắn với thiết bị đầu tiên mở link
@@ -163,8 +163,8 @@ if (db.prepare('SELECT COUNT(*) n FROM users').get().n === 0) {
   const p = process.env.ADMIN_PASSWORD || 'doi-mat-khau-ngay';
   db.prepare(
     `INSERT INTO users (name,key,username,password_hash,role,department,created_at)
-     VALUES (?,?,?,?,'admin','RISK',?)`
-  ).run('Quản trị', newKey(), u, bcrypt.hashSync(p, 10), Date.now());
+     VALUES (?,?,?,?,'super','RISK',?)`
+  ).run('Quản trị tổng', newKey(), u, bcrypt.hashSync(p, 10), Date.now());
   console.log(`[seed] Quản trị: ${u} / ${p} — đổi mật khẩu ngay sau khi đăng nhập.`);
 }
 
@@ -225,12 +225,13 @@ function present(a) {
   };
 }
 
-function lanes() {
+function lanes(scope = null) {
   return db.prepare(
     `SELECT brand, department, COUNT(*) headcount FROM users
      WHERE is_active=1 AND role='staff' AND department IS NOT NULL
+       AND (? IS NULL OR brand=?)
      GROUP BY brand, department ORDER BY department, brand`
-  ).all().map((p) => {
+  ).all(scope, scope).map((p) => {
     const h = holderOf(p.brand, p.department);
     return { ...p, holder: h ? present(h) : null };
   });
@@ -337,8 +338,9 @@ function stateFor(user) {
 /* ============================================================
    QUẢN TRỊ
    ============================================================ */
-function history(f = {}) {
+function history(f = {}, scope = null) {
   const w = [], p = [];
+  if (scope !== null) { w.push('a.brand=?'); p.push(scope); }
   if (f.user_id)    { w.push('a.user_id=?');    p.push(f.user_id); }
   if (f.type_code)  { w.push('a.type_code=?');  p.push(f.type_code); }
   if (f.brand)      { w.push('a.brand=?');      p.push(f.brand); }
@@ -392,6 +394,18 @@ const LOCATION_TZ = {
 };
 const DEFAULT_TZ = process.env.DEFAULT_TZ || 'Asia/Ho_Chi_Minh';
 const LOCATIONS = ['VN', 'ARM'];
+
+/* Phạm vi của một tài khoản quản trị.
+   'super' -> null = thấy tất cả. 'admin' -> đúng brand của họ.
+   Mọi truy vấn quản trị đều phải đi qua đây, không có ngoại lệ. */
+function scopeOf(user) {
+  if (!user) return '__none__';
+  if (user.role === 'super') return null;
+  if (user.role === 'admin') return user.brand || '__none__';   // admin chưa gán brand thì không thấy gì
+  return '__none__';
+}
+const isSuper = (u) => !!u && u.role === 'super';
+const inScope = (scope, brand) => scope === null || brand === scope;
 
 const tzOf = (loc) => LOCATION_TZ[String(loc || '').trim().toUpperCase()] || DEFAULT_TZ;
 
@@ -517,8 +531,12 @@ function shiftToday(user) {
 /* Lịch sử chấm công — quản trị xem hết, nhân viên chỉ thấy của mình */
 function punchHistory(f = {}, viewer = null) {
   const w = [], p = [];
-  if (viewer && viewer.role !== 'admin') { w.push('p.user_id=?'); p.push(viewer.id); }
-  else if (f.user_id) { w.push('p.user_id=?'); p.push(f.user_id); }
+  if (viewer && viewer.role === 'staff') { w.push('p.user_id=?'); p.push(viewer.id); }
+  else {
+    const scope = scopeOf(viewer);
+    if (scope !== null) { w.push('p.brand=?'); p.push(scope); }
+    if (f.user_id) { w.push('p.user_id=?'); p.push(f.user_id); }
+  }
   if (f.kind)       { w.push('p.kind=?');       p.push(f.kind); }
   if (f.department) { w.push('p.department=?'); p.push(f.department); }
   if (f.brand)      { w.push('p.brand=?');      p.push(f.brand); }
@@ -644,7 +662,7 @@ function toggleOff(user, day, byAdmin = false) {
 }
 
 /* Tổng hợp cho quản trị: Tất cả / Chưa đăng ký / 1 / 2 / 3 / 4 ngày */
-function offSummary(ym, f = {}) {
+function offSummary(ym, f = {}, scope = null) {
   const filter = String(f.filter || '');
   const rows = db.prepare(
     `SELECT u.id, u.name, u.department, u.brand,
@@ -652,7 +670,8 @@ function offSummary(ym, f = {}) {
             (SELECT GROUP_CONCAT(d.day) FROM day_offs d WHERE d.user_id=u.id AND d.day LIKE ?) days
      FROM users u WHERE u.role='staff' AND u.is_active=1
      ORDER BY u.department, u.name`).all(ym + '%', ym + '%')
-    .filter((r) => (!f.user_id || r.id === +f.user_id)
+    .filter((r) => inScope(scope, r.brand)
+                && (!f.user_id || r.id === +f.user_id)
                 && (!f.department || r.department === f.department)
                 && (!f.brand || r.brand === f.brand));
 
@@ -707,9 +726,9 @@ function setLock(ym, locked) {
    mode 'merge'   : chỉ đụng tới người có trong file, người khác giữ nguyên
    mode 'replace' : xoá sạch lịch tháng đó của MỌI người rồi ghi lại theo file
    ============================================================ */
-function applySchedule(parsed, mode = 'merge') {
+function applySchedule(parsed, mode = 'merge', scope = null) {
   const { ym, rows } = parsed;
-  const matched = [], missing = [];
+  const matched = [], missing = [], outside = [];
 
   const byKey = db.prepare("SELECT * FROM users WHERE key=? AND role='staff'");
   const byName = db.prepare("SELECT * FROM users WHERE name=? AND role='staff'");
@@ -717,6 +736,8 @@ function applySchedule(parsed, mode = 'merge') {
   const resolved = rows.map((r) => {
     const u = (r.key && byKey.get(r.key.toUpperCase())) || (r.name && byName.get(r.name)) || null;
     if (!u) { missing.push(r.name || r.key); return null; }
+    // Admin của brand này không được đụng vào người của brand kia
+    if (!inScope(scope, u.brand)) { outside.push(u.name); return null; }
     matched.push(u.name);
     return { user: u, rec: r };
   }).filter(Boolean);
@@ -728,7 +749,13 @@ function applySchedule(parsed, mode = 'merge') {
 
   let dayCount = 0;
   db.transaction(() => {
-    if (mode === 'replace') delMonth.run(ym + '%');
+    if (mode === 'replace') {
+      // Ghi đè chỉ xoá lịch của người trong phạm vi, không đụng brand khác
+      if (scope === null) delMonth.run(ym + '%');
+      else db.prepare(
+        `DELETE FROM shift_days WHERE day LIKE ?
+         AND user_id IN (SELECT id FROM users WHERE brand=?)`).run(ym + '%', scope);
+    }
 
     for (const { user, rec } of resolved) {
       if (mode !== 'replace') delUser.run(user.id, ym + '%');
@@ -738,8 +765,9 @@ function applySchedule(parsed, mode = 'merge') {
         ? String(rec.location).toUpperCase() : user.location;
       const dep = DEPTS.includes(String(rec.department).toUpperCase())
         ? String(rec.department).toUpperCase() : user.department;
-      const br = BRANDS.includes(String(rec.brand).toUpperCase())
+      let br = BRANDS.includes(String(rec.brand).toUpperCase())
         ? String(rec.brand).toUpperCase() : user.brand;
+      if (scope !== null) br = user.brand;   // admin theo brand không được chuyển người sang brand khác
       updMeta.run(loc, dep, br, user.id);
 
       for (const [day, t] of Object.entries(rec.days)) {
@@ -749,7 +777,7 @@ function applySchedule(parsed, mode = 'merge') {
     }
   })();
 
-  return { ym, mode, matched, missing, dayCount, errors: parsed.errors };
+  return { ym, mode, matched, missing, outside, dayCount, errors: parsed.errors };
 }
 
 /* Lịch tháng của một người, để hiển thị */
@@ -759,13 +787,13 @@ function scheduleOf(userId, ym) {
 }
 
 /* Tổng quan lịch tháng cho quản trị */
-function scheduleSummary(ym) {
+function scheduleSummary(ym, scope = null) {
   const rows = db.prepare(
     `SELECT u.id, u.name, u.location, u.department, u.brand,
             (SELECT COUNT(*) FROM shift_days s WHERE s.user_id=u.id AND s.day LIKE ?) work_days
-     FROM users u WHERE u.role='staff' AND u.is_active=1
+     FROM users u WHERE u.role='staff' AND u.is_active=1 AND (? IS NULL OR u.brand=?)
      ORDER BY u.location, u.department, u.name`
-  ).all(ym + '%');
+  ).all(ym + '%', scope, scope);
 
   const [y, mo] = ym.split('-').map(Number);
   const dim = new Date(y, mo, 0).getDate();
@@ -777,13 +805,14 @@ function scheduleSummary(ym) {
   };
 }
 
-const allUsers = () =>
+const allUsers = (scope = null) =>
   db.prepare(
     `SELECT u.id,u.name,u.key,u.department,u.brand,u.location,u.role,u.is_active,
             u.device_id,u.device_seen_at,
             (SELECT COUNT(*) FROM shift_days s WHERE s.user_id=u.id AND s.day LIKE ?) work_days
-     FROM users u ORDER BY u.role DESC, u.location, u.department, u.name`
-  ).all(new Date().toISOString().slice(0, 7) + '%')
+     FROM users u WHERE (? IS NULL OR u.brand=? OR u.role='super')
+     ORDER BY u.role DESC, u.location, u.department, u.name`
+  ).all(new Date().toISOString().slice(0, 7) + '%', scope, scope)
     .map((u) => ({ ...u, bound: !!u.device_id, timezone: tzOf(u.location) }));
 
 function audit(actor, action, detail, ip) {
@@ -799,5 +828,6 @@ module.exports = {
   punch, shiftToday, punchHistory, scheduledFor,
   myOffs, toggleOff, offSummary, setLock, isLocked, whoOff, MAX_OFF_PER_DAY_DEPT,
   LOCATIONS, LOCATION_TZ, tzOf, zonedToUtc, dayInTz, shiftWindow,
+  scopeOf, isSuper, inScope,
   applySchedule, scheduleOf, scheduleSummary,
 };
