@@ -1,0 +1,747 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Quản trị · Trạm trực</title>
+<meta name="theme-color" content="#F1F3F2">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+
+<div class="toast hide" id="toast"><span class="b"></span>
+  <div><div class="tt" id="tt"></div><div class="ts" id="ts"></div></div></div>
+
+<!-- Đăng nhập: chỉ quản trị mới cần -->
+<div class="gate" id="gate" hidden>
+  <div class="card">
+    <h1>Quản trị</h1>
+    <p>Nhân viên không cần đăng nhập — họ vào bằng link riêng.</p>
+    <form id="lf">
+      <label>Tài khoản<input name="username" autocapitalize="off" autocomplete="username" required></label>
+      <label>Mật khẩu<input name="password" type="password" autocomplete="current-password" required></label>
+      <button class="btn btn-pri btn-block" type="submit" id="lb">Đăng nhập</button>
+      <div class="err" id="le"></div>
+    </form>
+  </div>
+</div>
+
+<div id="app" hidden>
+  <div class="top">
+    <span class="lg">Trạm trực</span>
+    <span id="scopeTag"></span>
+    <span class="sp"></span>
+    <a class="mini" href="/">Trang nhân viên</a>
+    <button class="mini" id="pw">Đổi mật khẩu</button>
+    <button class="mini" id="out">Thoát</button>
+  </div>
+  <div class="adm">
+    <div class="head">
+      <div><h1>Hoạt động</h1><p>Rời vị trí trong ca · mỗi bộ phận 1 người cùng lúc</p></div>
+      <div class="sp"><button class="btn btn-sm" id="exp">Xuất Excel</button></div>
+    </div>
+    <div class="tabs">
+      <button id="tb" class="on">Theo dõi</button>
+      <button id="tp">Chấm công</button>
+      <button id="tl">Trễ</button>
+      <button id="to">Lịch off</button>
+      <button id="tu">Nhân sự</button>
+      <button id="tm" hidden>Quản trị viên</button>
+    </div>
+    <div id="pb"></div>
+    <div id="pp" hidden></div>
+    <div id="pl" hidden></div>
+    <div id="po" hidden></div>
+    <div id="pu" hidden></div>
+    <div id="pm" hidden></div>
+  </div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const pad = n => String(n).padStart(2, '0');
+const clk = s => (s < 0 ? '-' : '') + pad(Math.floor(Math.abs(s) / 60)) + ':' + pad(Math.abs(s) % 60);
+const dmy = t => pad(new Date(t).getDate()) + '/' + pad(new Date(t).getMonth() + 1) + '/' + new Date(t).getFullYear();
+const hms = t => t ? pad(new Date(t).getHours()) + ':' + pad(new Date(t).getMinutes()) + ':' + pad(new Date(t).getSeconds()) : '—';
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+let B = null, skew = 0, TAB = 'b';
+const nowMs = () => Date.now() + skew;
+const leftOf = h => Math.round((h.started_at + h.limit_minutes * 60000 - nowMs()) / 1000);
+const pctOf  = h => Math.min(100, ((nowMs() - h.started_at) / (h.limit_minutes * 60000)) * 100);
+
+function toast(t, s, ok) {
+  const el = $('#toast');
+  el.classList.toggle('err', !ok); el.classList.remove('hide');
+  $('#tt').textContent = t; $('#ts').textContent = s || '';
+  clearTimeout(toast._t); toast._t = setTimeout(() => el.classList.add('hide'), 4200);
+}
+
+async function api(url, opts) {
+  const r = await fetch(url, {
+    headers: { 'Content-Type': 'application/json' }, ...opts,
+    body: opts && opts.body ? JSON.stringify(opts.body) : undefined,
+  });
+  return { status: r.status, ...(await r.json().catch(() => ({}))) };
+}
+
+/* ---------- Đăng nhập ---------- */
+$('#lf').addEventListener('submit', async e => {
+  e.preventDefault();
+  const f = new FormData(e.target);
+  $('#lb').disabled = true;
+  const r = await api('/api/admin/login', { method: 'POST',
+    body: { username: f.get('username'), password: f.get('password') } });
+  $('#lb').disabled = false;
+  if (!r.ok) { $('#le').textContent = r.message || 'Không đăng nhập được.'; return; }
+  $('#le').textContent = ''; load();
+});
+$('#out').addEventListener('click', async () => { await api('/api/logout', { method: 'POST' }); location.reload(); });
+$('#pw').addEventListener('click', async () => {
+  const c = prompt('Mật khẩu hiện tại:'); if (!c) return;
+  const n = prompt('Mật khẩu mới (ít nhất 8 ký tự):'); if (!n) return;
+  const r = await api('/api/admin/password', { method: 'POST', body: { current: c, next: n } });
+  toast(r.ok ? 'Đã đổi mật khẩu' : 'Không đổi được', r.message || '', !!r.ok);
+});
+
+/* ---------- Tải ---------- */
+function q() {
+  const p = new URLSearchParams();
+  ['user_id','type_code','brand','department','from','to','only'].forEach(k => {
+    const el = document.querySelector(`[data-q="${k}"]`);
+    if (el && el.value) p.set(k, el.value);
+  });
+  return p.toString();
+}
+
+async function load() {
+  const r = await fetch('/api/admin/board?' + q());
+  if (r.status === 401 || r.status === 403) { $('#gate').hidden = false; $('#app').hidden = true; return; }
+  B = await r.json();
+  skew = B.server_time - Date.now();
+  $('#gate').hidden = true; $('#app').hidden = false;
+
+  const isSuper = B.me && B.me.role === 'super';
+  $('#tm').hidden = !isSuper;
+  $('#scopeTag').innerHTML = isSuper
+    ? '<span class="pill">Quản trị tổng · cả hai brand</span>'
+    : `<span class="pill pri">Brand ${esc(B.me ? B.me.brand : '')}</span>`;
+  TAB === 'b' ? renderBoard() : renderUsers();
+}
+
+/* ---------- Theo dõi ---------- */
+function renderBoard() {
+  const lanes = B.lanes.map(c => {
+    const h = c.holder, label = `${c.department}${c.brand ? ' · ' + c.brand : ''}`;
+    if (!h) return `<div class="lane"><div class="ic">${c.department.slice(0,2)}</div>
+      <div class="m"><div class="a">${label}</div><div class="b">Trống · ${c.headcount} nhân sự</div></div></div>`;
+    const l = leftOf(h);
+    return `<div class="lane ${l < 0 ? 'over' : 'busy'}">
+      <div class="ic">${c.department.slice(0,2)}</div>
+      <div class="m"><div class="a">${esc(h.user_name)}</div>
+        <div class="b">${label} · ${h.type_name}</div></div>
+      <div class="cd" data-cd="${h.id}">${clk(l)}</div>
+      <i class="fill" data-fill="${h.id}" style="width:${pctOf(h)}%"></i></div>`;
+  }).join('');
+
+  const cb = {
+    staff: '<span class="sub">Nhân viên</span>',
+    auto: '<span class="pill amb">Quên bấm</span>',
+    admin: '<span class="pill">Quản trị</span>',
+  };
+
+  const trs = B.rows.map(r => `<tr>
+    <td class="wide"><div style="font-weight:600">${esc(r.user_name)}</div>
+      <div style="margin-top:5px;display:inline-flex;gap:5px">
+        <span class="pill">${r.department || '—'}</span>
+        ${r.brand ? `<span class="pill pri">${r.brand}</span>` : ''}</div></td>
+    <td>${r.type_name}<div class="sub">cho phép ${r.limit_minutes} phút</div></td>
+    <td>${dmy(r.started_at)}<div class="sub">${hms(r.started_at)}</div></td>
+    <td>${hms(r.ended_at)}</td>
+    <td>${r.duration_sec == null ? '<span class="pill amb">Đang chạy</span>'
+      : `<span style="font-weight:600">${Math.floor(r.duration_sec/60)}p${pad(r.duration_sec%60)}s</span>
+         <div style="margin-top:4px"><span class="pill ${r.is_over_limit ? 'red' : 'pri'}">${r.is_over_limit ? 'Quá giờ' : 'Trong giờ'}</span></div>`}</td>
+    <td>${cb[r.closed_by] || '<span class="sub">—</span>'}</td>
+    <td class="sub">${r.ip || '—'}</td>
+    <td style="text-align:right">${r.ended_at ? '<span class="sub">—</span>'
+      : `<button class="btn btn-red btn-sm" onclick="closeAct(${r.id})">Đóng hộ</button>`}</td></tr>`).join('');
+
+  const sel = (k, o, ph) => `<select data-q="${k}" onchange="load()"><option value="">${ph}</option>${o}</select>`;
+
+  $('#pb').innerHTML = `
+    <div class="lanes">${lanes || '<div class="lane"><div class="m"><div class="b">Chưa có nhân sự nào.</div></div></div>'}</div>
+
+    <div class="kpis">
+      <div class="kpi"><div class="n">${B.stats.total}</div><div class="l">Lượt khớp bộ lọc</div></div>
+      <div class="kpi amb"><div class="n">${B.stats.running}</div><div class="l">Đang diễn ra</div></div>
+      <div class="kpi red"><div class="n">${B.stats.over}</div><div class="l">Quá giờ</div></div>
+      <div class="kpi"><div class="n">${B.stats.forgot}</div><div class="l">Quên bấm dừng</div></div>
+    </div>
+
+    <div class="fil">
+      <div class="f"><label>Nhân viên</label>${sel('user_id',
+        B.users.filter(u=>u.role==='staff').map(u=>`<option value="${u.id}">${esc(u.name)}</option>`).join(''),'Tất cả')}</div>
+      <div class="f"><label>Hoạt động</label>${sel('type_code',
+        B.types.map(t=>`<option value="${t.code}">${t.name}</option>`).join(''),'Tất cả')}</div>
+      <div class="f"><label>Bộ phận</label>${sel('department',
+        B.departments.map(d=>`<option>${d}</option>`).join(''),'Tất cả')}</div>
+      <div class="f"><label>Brand</label>${sel('brand',
+        B.brands.map(b=>`<option>${b}</option>`).join(''),'Tất cả')}</div>
+      <div class="f"><label>Từ ngày</label><input type="date" data-q="from" onchange="load()"></div>
+      <div class="f"><label>Đến ngày</label><input type="date" data-q="to" onchange="load()"></div>
+      <div class="f"><label>Chỉ xem</label>${sel('only',
+        '<option value="over">Quá giờ</option><option value="forgot">Quên bấm dừng</option>','Tất cả')}</div>
+      <button class="btn btn-sm" onclick="clearFil()">Xóa lọc</button>
+    </div>
+
+    <div class="tw"><table>
+      <thead><tr><th class="wide">Nhân viên</th><th>Hoạt động</th><th>Bắt đầu</th><th>Kết thúc</th>
+      <th>Thời lượng</th><th>Kết thúc bởi</th><th>IP</th><th style="text-align:right">Xử lý</th></tr></thead>
+      <tbody>${trs || '<tr><td colspan="8" class="empty">Chưa có hoạt động nào khớp bộ lọc.</td></tr>'}</tbody>
+    </table></div>
+    <div class="sub" style="margin-top:10px">${B.rows.length} bản ghi hiển thị</div>`;
+}
+
+function clearFil() { document.querySelectorAll('[data-q]').forEach(e => e.value = ''); load(); }
+
+async function closeAct(id) {
+  if (!confirm('Đóng hoạt động này ngay bây giờ?')) return;
+  const r = await api('/api/admin/close/' + id, { method: 'POST' });
+  toast(r.ok ? 'Đã đóng hộ' : 'Không đóng được', r.message || '', !!r.ok);
+  load();
+}
+
+/* ---------- Nhân sự ---------- */
+function linkOf(k) { return location.origin + '/k/' + k; }
+
+function renderUsers() {
+  const staff = B.users.filter(u => u.role === 'staff');
+  const trs = staff.map(u => `<tr>
+    <td class="wide"><div style="font-weight:600">${esc(u.name)}</div>
+      <div style="margin-top:5px;display:inline-flex;gap:5px">
+        <span class="pill">${u.department || '—'}</span>
+        ${u.brand ? `<span class="pill pri">${u.brand}</span>` : ''}
+        ${u.is_active ? '' : '<span class="pill red">Đã khóa</span>'}</div></td>
+    <td><div class="keybox"><code>${u.key}</code>
+      <button class="btn btn-sm" onclick="copyLink('${u.key}','${esc(u.name).replace(/'/g,"\\'")}')">Chép link</button></div></td>
+    <td><select style="width:auto;min-width:92px" onchange="setLoc(${u.id},this.value)">
+        <option value="VN" ${u.location === 'VN' ? 'selected' : ''}>VN</option>
+        <option value="ARM" ${u.location === 'ARM' ? 'selected' : ''}>ARM</option>
+      </select>
+      <div class="sub" style="margin-top:4px">${u.timezone || ''}</div></td>
+    <td>${u.work_days
+      ? `<span class="pill pri">${u.work_days} ngày</span>`
+      : '<span class="pill red">chưa có lịch</span>'}</td>
+    <td>${u.bound
+      ? `<span class="pill pri"><span class="dot"></span>Đã gắn máy</span>
+         <div class="sub" style="margin-top:4px">${dmy(u.device_seen_at)}</div>`
+      : '<span class="pill">Chưa mở lần nào</span>'}</td>
+    <td style="text-align:right;white-space:nowrap">
+      ${u.bound ? `<button class="btn btn-sm" onclick="post(${u.id},'unbind')">Gỡ máy</button>` : ''}
+      <button class="btn btn-sm" onclick="post(${u.id},'rekey')">Cấp key mới</button>
+      ${u.is_active
+        ? `<button class="btn btn-red btn-sm" onclick="lockU(${u.id})">Khóa</button>`
+        : `<button class="btn btn-sm" onclick="upd(${u.id},{is_active:1})">Mở</button>`}</td></tr>`).join('');
+
+  const depOpts = B.departments.map(d => `<option>${d}</option>`).join('');
+  const scoped = B.scope !== null && B.scope !== undefined;
+  const brOpts = (scoped ? '' : '<option value="">—</option>') + B.brands.map(b => `<option>${b}</option>`).join('');
+
+  $('#pu').innerHTML = `
+    <div class="card card-p" style="margin-bottom:12px">
+      <div style="font-size:11.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--tx3);margin-bottom:10px">
+        Nhập lịch ca tháng từ Excel / CSV</div>
+      <div class="row">
+        <div class="f" style="max-width:170px"><label>Tháng áp dụng</label>
+          <input type="month" id="schYm" value="${new Date().toISOString().slice(0, 7)}"></div>
+        <div class="f"><label>File lịch</label><input type="file" id="schFile" accept=".xlsx,.xls,.csv"></div>
+        <button class="btn" onclick="schImport('preview')">Xem trước</button>
+        <button class="btn btn-pri" onclick="schImport('merge')">Merge</button>
+        <button class="btn btn-red" onclick="schImport('replace')">Ghi đè tháng</button>
+      </div>
+      <div id="schOut" class="sub" style="margin-top:10px;line-height:1.6"></div>
+      <div class="note" style="font-size:12.5px;color:var(--tx3);margin-top:8px;line-height:1.55">
+        Một dòng một người, mỗi ngày trong tháng một cột:
+        <span class="mono">Ma | Ten | KhuVuc | BoPhan | Brand | 1 | 2 | … | 31</span>.
+        Ô ghi <span class="mono">08:00-16:00</span>, để trống hoặc <span class="mono">OFF</span> là nghỉ.
+        Giờ trong file là <b>giờ địa phương</b> của người đó — KhuVuc <span class="mono">VN</span> hay
+        <span class="mono">ARM</span> quyết định múi giờ. Dùng chung được file của bot Telegram,
+        chỉ cần đổi cột TelegramID thành cột <span class="mono">Ma</span>.
+      </div>
+    </div>
+
+    <div class="card card-p" style="margin-bottom:12px">
+      <div class="row">
+        <div class="f"><label>Tên nhân viên</label><input id="nn" placeholder="Nguyễn Thu Hà"></div>
+        <div class="f" style="max-width:170px"><label>Bộ phận</label><select id="nd">${depOpts}</select></div>
+        <div class="f" style="max-width:120px"><label>Brand</label>
+          <select id="nb" ${scoped ? 'disabled title="Bạn chỉ thêm được người của brand mình"' : ''}>${brOpts}</select></div>
+        <button class="btn btn-pri" onclick="addU()">Thêm</button>
+      </div>
+    </div>
+
+    <div class="card card-p" style="margin-bottom:16px">
+      <div style="font-size:11.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--tx3);margin-bottom:10px">
+        Thêm hàng loạt — mỗi dòng: Tên | Bộ phận | Brand</div>
+      <textarea id="bk" rows="6" placeholder="Nguyễn Thu Hà | CS | AE
+Trần Minh Anh | CS | AE
+Đỗ Thanh Tùng | VIP | ST"></textarea>
+      <button class="btn btn-pri" style="margin-top:10px" onclick="bulk()">Thêm tất cả</button>
+    </div>
+
+    <div class="tw"><table>
+      <thead><tr><th class="wide">Nhân viên</th><th>Link vào ca</th><th>Khu vực</th>
+        <th>Lịch tháng này</th><th>Thiết bị</th><th style="text-align:right">Xử lý</th></tr></thead>
+      <tbody>${trs || '<tr><td colspan="6" class="empty">Chưa có nhân viên nào.</td></tr>'}</tbody>
+    </table></div>
+    <div class="sub" style="margin-top:10px">${staff.length} nhân viên · gửi link cho từng người một lần,
+      họ lưu vào màn hình chính là xong</div>`;
+}
+
+async function schImport(mode) {
+  const f = $('#schFile').files[0];
+  const ym = $('#schYm').value;
+  if (!f) return toast('Chưa chọn file', 'Chọn file .xlsx hoặc .csv trước.', false);
+  if (!ym) return toast('Chưa chọn tháng', 'Cần tháng áp dụng.', false);
+  if (mode === 'replace' && !confirm(`Ghi đè toàn bộ lịch tháng ${ym}? Lịch cũ của MỌI người trong tháng này sẽ bị xoá.`)) return;
+
+  const out = $('#schOut');
+  out.textContent = 'Đang đọc file…';
+
+  let res, r;
+  try {
+    res = await fetch(`/api/admin/schedule/import?ym=${ym}&mode=${mode}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: f,
+    });
+  } catch (e) {
+    out.innerHTML = `<b style="color:var(--red)">Không gọi được máy chủ.</b> Kiểm tra kết nối rồi thử lại.`;
+    return;
+  }
+
+  // Máy chủ trả về HTML thay vì JSON = route chưa tồn tại hoặc app lỗi.
+  // Nói rõ mã lỗi thay vì gộp hết thành "lỗi mạng".
+  const ctype = res.headers.get('content-type') || '';
+  if (!ctype.includes('application/json')) {
+    const why = res.status === 404
+      ? 'Máy chủ chưa có chức năng nhập lịch — <b>server.js và schedule.js trên máy chủ chưa được cập nhật</b>. Đẩy đủ 3 file <span class="mono">server.js</span>, <span class="mono">schedule.js</span>, <span class="mono">package.json</span> rồi deploy lại.'
+      : res.status === 413 ? 'File quá lớn (giới hạn 8MB). Xoá bớt sheet thừa hoặc lưu lại dạng .csv.'
+      : res.status === 401 || res.status === 403 ? 'Phiên đăng nhập đã hết. Tải lại trang và đăng nhập lại.'
+      : `Máy chủ trả về lỗi ${res.status}. Xem tab Logs trên Render để biết chi tiết.`;
+    out.innerHTML = `<b style="color:var(--red)">Lỗi ${res.status}.</b> ${why}`;
+    return;
+  }
+
+  r = await res.json().catch(() => ({ ok: false, message: 'Máy chủ trả về dữ liệu không đọc được.' }));
+
+  if (!r.ok) {
+    out.innerHTML = `<b style="color:var(--red)">${esc(r.message || 'Không đọc được file.')}</b>`
+      + (r.errors && r.errors.length ? `<br>${r.errors.slice(0, 5).map(esc).join('<br>')}` : '');
+    return;
+  }
+
+  const parts = [];
+  if (r.preview) {
+    parts.push(`<b>Xem trước tháng ${r.ym}:</b> ${r.count} người · ${r.dayCount} ngày làm.`);
+    if (r.matched.length) parts.push(`Khớp: ${r.matched.slice(0, 10).map(esc).join(', ')}${r.matched.length > 10 ? '…' : ''}`);
+  } else {
+    parts.push(`<b style="color:var(--pri)">${esc(r.message)}</b>`);
+    toast('Đã áp lịch', r.message, true);
+  }
+  if (r.missing && r.missing.length)
+    parts.push(`<b style="color:var(--red)">Không tìm thấy ${r.missing.length} người trong danh sách:</b> ${r.missing.map(esc).join(', ')} — thêm họ vào bên dưới rồi nhập lại.`);
+  if (r.errors && r.errors.length)
+    parts.push(`<b style="color:var(--amb)">${r.errors.length} ô có vấn đề (đã coi là nghỉ):</b><br>${r.errors.slice(0, 6).map(esc).join('<br>')}${r.errors.length > 6 ? '<br>…' : ''}`);
+
+  out.innerHTML = parts.join('<br>');
+  if (!r.preview) load();
+}
+
+async function setLoc(id, location) {
+  const r = await api(`/api/admin/users/${id}/location`, { method: 'PUT', body: { location } });
+  toast(r.ok ? 'Đã đổi khu vực' : 'Không đổi được', r.message || '', !!r.ok);
+  load();
+}
+
+async function copyLink(key, name) {
+  const url = linkOf(key);
+  try { await navigator.clipboard.writeText(url); toast('Đã chép link', `${name} — ${url}`, true); }
+  catch { prompt('Chép link này gửi cho ' + name + ':', url); }
+}
+
+async function addU() {
+  const r = await api('/api/admin/users', { method: 'POST',
+    body: { name: $('#nn').value, department: $('#nd').value, brand: $('#nb').value } });
+  toast(r.ok ? 'Đã thêm' : 'Không thêm được', r.message || '', !!r.ok);
+  if (r.ok) { $('#nn').value = ''; load(); }
+}
+
+async function bulk() {
+  const r = await api('/api/admin/users/bulk', { method: 'POST', body: { text: $('#bk').value } });
+  if (!r.ok) return toast('Không thêm được', r.message || '', false);
+  toast(`Đã thêm ${r.created.length} nhân viên`,
+    r.skipped.length ? `Bỏ qua ${r.skipped.length}: ${r.skipped.slice(0,2).join('; ')}` : 'Bấm “Chép link” để gửi cho từng người.', true);
+  $('#bk').value = ''; load();
+}
+
+async function post(id, what) {
+  const msg = what === 'rekey'
+    ? 'Cấp key mới? Link cũ sẽ không dùng được nữa.'
+    : 'Gỡ thiết bị đã gắn? Link cũ vẫn dùng được trên máy mới.';
+  if (!confirm(msg)) return;
+  const r = await api(`/api/admin/users/${id}/${what}`, { method: 'POST' });
+  toast(r.ok ? 'Xong' : 'Không thực hiện được', r.message || '', !!r.ok);
+  load();
+}
+
+async function upd(id, body) {
+  const r = await api('/api/admin/users/' + id, { method: 'PUT', body });
+  toast(r.ok ? 'Đã cập nhật' : 'Không cập nhật được', r.message || '', !!r.ok);
+  load();
+}
+
+async function lockU(id) {
+  if (!confirm('Khóa nhân viên này? Lịch sử hoạt động vẫn giữ lại.')) return;
+  const r = await api('/api/admin/users/' + id, { method: 'DELETE' });
+  toast(r.ok ? 'Đã khóa' : 'Không khóa được', r.message || '', !!r.ok);
+  load();
+}
+
+/* ---------- Tài khoản quản trị (chỉ quản trị tổng) ---------- */
+async function loadAdmins() {
+  const r = await fetch('/api/admin/admins');
+  if (r.status !== 200) { $('#pm').innerHTML = '<div class="empty">Không có quyền xem mục này.</div>'; return; }
+  const d = await r.json();
+
+  const trs = d.admins.map(a => `<tr>
+    <td class="wide"><div style="font-weight:600">${esc(a.name)}</div>
+      <div class="sub mono">@${esc(a.username)}</div></td>
+    <td>${a.role === 'super'
+      ? '<span class="pill">Quản trị tổng</span>'
+      : `<span class="pill pri">Brand ${a.brand || '—'}</span>`}</td>
+    <td><span class="pill ${a.is_active ? 'pri' : 'red'}">${a.is_active ? 'Đang dùng' : 'Đã khóa'}</span></td>
+    <td style="text-align:right;white-space:nowrap">
+      ${a.role === 'admin' ? `<select style="width:auto" onchange="admSetBrand(${a.id},this.value)">
+        ${d.brands.map(x => `<option ${a.brand === x ? 'selected' : ''}>${x}</option>`).join('')}
+      </select>` : ''}
+      <button class="btn btn-sm" onclick="admResetPw(${a.id},'${esc(a.name).replace(/'/g, "\\'")}')">Đặt lại MK</button>
+      ${a.role === 'super' ? '' : `<button class="btn ${a.is_active ? 'btn-red' : ''} btn-sm"
+        onclick="admToggleActive(${a.id},${a.is_active ? 'false' : 'true'})">${a.is_active ? 'Khóa' : 'Mở'}</button>`}
+    </td></tr>`).join('');
+
+  $('#pm').innerHTML = `
+    <div class="card card-p" style="margin-bottom:16px">
+      <div style="font-size:11.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--tx3);margin-bottom:10px">
+        Thêm quản trị cho một brand</div>
+      <div class="row">
+        <div class="f"><label>Tên hiển thị</label><input id="anName" placeholder="Quản lý AE"></div>
+        <div class="f"><label>Tên đăng nhập</label><input id="anUser" placeholder="qt_ae"></div>
+        <div class="f"><label>Mật khẩu</label><input id="anPass" placeholder="ít nhất 8 ký tự"></div>
+        <div class="f" style="max-width:120px"><label>Brand</label>
+          <select id="anBrand">${d.brands.map(x => `<option>${x}</option>`).join('')}</select></div>
+        <button class="btn btn-pri" onclick="admCreate()">Thêm</button>
+      </div>
+      <div class="note" style="font-size:12.5px;color:var(--tx3);margin-top:9px;line-height:1.55">
+        Quản trị của một brand chỉ thấy và xử lý được nhân sự, chấm công, lịch off của brand đó.
+        Không xem được và không đụng được sang brand kia. Chỉ quản trị tổng thấy cả hai.
+      </div>
+    </div>
+
+    <div class="tw"><table>
+      <thead><tr><th class="wide">Tài khoản</th><th>Phạm vi</th><th>Trạng thái</th>
+        <th style="text-align:right">Xử lý</th></tr></thead>
+      <tbody>${trs}</tbody></table></div>
+    <div class="sub" style="margin-top:10px">${d.admins.length} tài khoản quản trị</div>`;
+}
+
+async function admCreate() {
+  const r = await api('/api/admin/admins', { method: 'POST', body: {
+    name: $('#anName').value, username: $('#anUser').value,
+    password: $('#anPass').value, brand: $('#anBrand').value } });
+  toast(r.ok ? 'Đã tạo' : 'Không tạo được', r.message || '', !!r.ok);
+  if (r.ok) { $('#anName').value = $('#anUser').value = $('#anPass').value = ''; loadAdmins(); }
+}
+async function admSetBrand(id, brand) {
+  const r = await api('/api/admin/admins/' + id, { method: 'PUT', body: { brand } });
+  toast(r.ok ? 'Đã đổi brand' : 'Không đổi được', r.message || '', !!r.ok);
+  loadAdmins();
+}
+async function admResetPw(id, name) {
+  const p = prompt(`Mật khẩu mới cho ${name} (ít nhất 8 ký tự):`);
+  if (!p) return;
+  const r = await api('/api/admin/admins/' + id, { method: 'PUT', body: { password: p } });
+  toast(r.ok ? 'Đã đặt lại mật khẩu' : 'Không đặt được', r.message || '', !!r.ok);
+}
+async function admToggleActive(id, active) {
+  if (!confirm(active ? 'Mở lại tài khoản này?' : 'Khóa tài khoản quản trị này?')) return;
+  const r = await api('/api/admin/admins/' + id, { method: 'PUT', body: { is_active: active } });
+  toast(r.ok ? 'Đã cập nhật' : 'Không cập nhật được', r.message || '', !!r.ok);
+  loadAdmins();
+}
+
+/* ---------- Khung ---------- */
+/* ---------- Bộ lọc dùng chung cho tab Chấm công / Trễ ---------- */
+function qp() {
+  const p = new URLSearchParams();
+  ['user_id','kind','department','brand','from','to','late_level'].forEach(k => {
+    const el = document.querySelector(`[data-p="${k}"]`);
+    if (el && el.value) p.set(k, el.value);
+  });
+  return p.toString();
+}
+
+const KIND_PILL = { in: 'pri', out: 'amb', log: '' };
+
+function punchTable(d, showLateFilter) {
+  const sel = (k, o, ph) => `<select data-p="${k}" onchange="${showLateFilter ? 'loadLate()' : 'loadPunches()'}">
+    <option value="">${ph}</option>${o}</select>`;
+
+  const trs = d.rows.map(r => `<tr>
+    <td class="wide"><div style="font-weight:600">${esc(r.user_name)}</div>
+      <div style="margin-top:5px;display:inline-flex;gap:5px">
+        <span class="pill">${r.department || '—'}</span>
+        ${r.brand ? `<span class="pill pri">${r.brand}</span>` : ''}</div></td>
+    <td><span class="pill ${KIND_PILL[r.kind]}">${r.kind_label}</span></td>
+    <td>${dmy(r.actual_at)}<div class="sub">${hms(r.actual_at)}</div></td>
+    <td class="sub">${r.scheduled_at ? hms(r.scheduled_at) : '—'}</td>
+    <td>${r.late_label
+      ? `<span class="pill ${r.late_level === 'in5' ? 'amb' : 'red'}">${r.late_label}</span>
+         <div class="sub" style="margin-top:4px">${r.late_minutes} phút</div>`
+      : '<span class="pill pri">Đúng giờ</span>'}</td>
+    <td class="sub">${r.ip || '—'}</td></tr>`).join('');
+
+  return `
+    <div class="kpis">
+      <div class="kpi"><div class="n">${d.stats.total}</div><div class="l">Lượt khớp bộ lọc</div></div>
+      <div class="kpi amb"><div class="n">${d.stats.in5}</div><div class="l">Trễ lên ca ~5p</div></div>
+      <div class="kpi red"><div class="n">${d.stats.in30}</div><div class="l">Trễ lên ca ~30p</div></div>
+      <div class="kpi red"><div class="n">${d.stats.out60}</div><div class="l">Trễ xuống ca ~60p</div></div>
+    </div>
+    <div class="fil">
+      ${d.is_admin ? `<div class="f"><label>Nhân viên</label>${sel('user_id',
+        d.users.map(u => `<option value="${u.id}">${esc(u.name)}</option>`).join(''), 'Tất cả')}</div>` : ''}
+      ${showLateFilter
+        ? `<div class="f"><label>Mức trễ</label>${sel('late_level',
+            Object.entries(d.levels).map(([k, v]) => `<option value="${k}">${v.label}</option>`).join(''), 'Tất cả')}</div>`
+        : `<div class="f"><label>Loại</label>${sel('kind',
+            Object.entries(d.kinds).map(([k, v]) => `<option value="${k}">${v}</option>`).join(''), 'Tất cả')}</div>`}
+      <div class="f"><label>Bộ phận</label>${sel('department',
+        d.departments.map(x => `<option>${x}</option>`).join(''), 'Tất cả')}</div>
+      <div class="f"><label>Brand</label>${sel('brand',
+        d.brands.map(x => `<option>${x}</option>`).join(''), 'Tất cả')}</div>
+      <div class="f"><label>Từ ngày</label><input type="date" data-p="from"
+        onchange="${showLateFilter ? 'loadLate()' : 'loadPunches()'}"></div>
+      <div class="f"><label>Đến ngày</label><input type="date" data-p="to"
+        onchange="${showLateFilter ? 'loadLate()' : 'loadPunches()'}"></div>
+      <button class="btn btn-sm" onclick="clearP('${showLateFilter ? 'l' : 'p'}')">Xóa lọc</button>
+    </div>
+    <div class="tw"><table>
+      <thead><tr><th class="wide">Nhân viên</th><th>Loại</th><th>Giờ bấm</th><th>Theo lịch</th>
+        <th>Mức trễ</th><th>IP</th></tr></thead>
+      <tbody>${trs || `<tr><td colspan="6" class="empty">${showLateFilter
+        ? 'Không có ai trễ theo bộ lọc này.' : 'Chưa có bản ghi chấm công nào.'}</td></tr>`}</tbody>
+    </table></div>
+    <div class="sub" style="margin-top:10px">${d.rows.length} bản ghi hiển thị</div>`;
+}
+
+function clearP(which) {
+  document.querySelectorAll('[data-p]').forEach(e => e.value = '');
+  which === 'l' ? loadLate() : loadPunches();
+}
+
+async function loadPunches() {
+  const r = await fetch('/api/punches?' + qp());
+  if (r.status === 401) return location.reload();
+  $('#pp').innerHTML = punchTable(await r.json(), false);
+}
+
+async function loadLate() {
+  const r = await fetch('/api/late?' + qp());
+  if (r.status === 401) return location.reload();
+  $('#pl').innerHTML = punchTable(await r.json(), true);
+}
+
+/* ---------- Lịch off ---------- */
+let offYm = new Date().toISOString().slice(0, 7);
+let offQ = { filter: '', user_id: '', department: '', brand: '' };
+
+function offReadFilters() {
+  document.querySelectorAll('[data-o]').forEach(el => {
+    const k = el.dataset.o;
+    if (k === 'filter2') return;              // ô "số ngày" ghi vào cùng khoá filter
+    offQ[k] = el.value;
+  });
+}
+function offSetDays(v) { offQ.filter = v; loadOffs(); }
+function offClear() { offQ = { filter: '', user_id: '', department: '', brand: '' }; loadOffs(); }
+
+async function loadOffs() {
+  if (document.querySelector('[data-o]')) offReadFilters();
+  const qs = new URLSearchParams({ ym: offYm, ...offQ });
+  const r = await fetch('/api/admin/offs?' + qs);
+  if (r.status === 401) return location.reload();
+  const d = await r.json();
+  const [y, m] = d.ym.split('-').map(Number);
+
+
+  const trs = d.rows.map(u => `<tr>
+    <td class="wide"><div style="font-weight:600">${esc(u.name)}</div>
+      <div style="margin-top:5px;display:inline-flex;gap:5px">
+        <span class="pill">${u.department || '—'}</span>
+        ${u.brand ? `<span class="pill pri">${u.brand}</span>` : ''}</div></td>
+    <td><span class="pill ${u.n === 0 ? 'red' : (u.n >= d.max ? 'pri' : 'amb')}">${u.n}/${d.max} ngày</span></td>
+    <td class="wide">${u.days.length
+      ? u.days.map(day => {
+          const bad = u.rejected.includes(day);
+          return `<button class="daytag ${bad ? 'bad' : ''}"
+            title="${bad ? 'Nguyện vọng này chưa được đáp ứng — lịch vẫn xếp ca. Bấm để bỏ.'
+                         : 'Bấm để bỏ ngày này'}"
+            onclick="admToggle(${u.id},'${day}')">${+day.slice(8)}<span>×</span></button>`;
+        }).join('')
+      : '<span class="sub">chưa đăng ký</span>'}</td>
+    <td>${!u.has_schedule ? '<span class="pill">chưa xếp lịch</span>'
+      : (u.rejected.length
+          ? `<span class="pill red">${u.rejected.length} ngày chưa đáp ứng</span>
+             <div class="sub" style="margin-top:4px">duyệt ${u.approved.length}/${u.n}</div>`
+          : `<span class="pill pri">duyệt đủ ${u.approved.length}</span>`)}</td>
+    <td style="text-align:right"><button class="btn btn-sm" onclick="admAdd(${u.id},'${esc(u.name)}')">Thêm ngày</button></td>
+  </tr>`).join('');
+
+  $('#po').innerHTML = `
+    <div class="offnav" style="padding:0 0 14px">
+      <button class="btn btn-sm" onclick="offMove(-1)">‹ Tháng trước</button>
+      <b style="font-size:17px">Tháng ${m}/${y}</b>
+      <button class="btn btn-sm" onclick="offMove(1)">Tháng sau ›</button>
+    </div>
+    <div class="card card-p" style="margin-bottom:16px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+      <div style="flex:1;min-width:200px">
+        <div style="font-weight:700">${d.locked ? '🔒 Tháng này đang khóa' : 'Tháng này đang mở'}</div>
+        <div class="sub">${d.locked
+          ? 'Nhân viên không tự đăng ký hay bỏ ngày được. Quản trị vẫn chỉnh được.'
+          : `Nhân viên tự đăng ký, tối đa ${d.max} ngày.`}</div>
+      </div>
+      <button class="btn ${d.locked ? '' : 'btn-red'}" onclick="offLock(${d.locked ? 'false' : 'true'})">
+        ${d.locked ? 'Mở khóa tháng' : 'Khóa tháng'}</button>
+    </div>
+    <div class="card card-p" style="margin-bottom:16px;background:#FAFBFB">
+      <div class="sub" style="line-height:1.7">
+        <b style="color:var(--ink)">Quy trình:</b>
+        ① nhân viên đăng ký nguyện vọng nghỉ →
+        ② quản lý xem bảng này rồi xếp ca →
+        ③ nhập file lịch ở tab Nhân sự →
+        ④ khóa tháng để chốt.<br>
+        Cột <b>Đối chiếu lịch</b> so nguyện vọng với lịch đã nhập:
+        ngày nào xin nghỉ mà lịch vẫn xếp ca thì hiện đỏ${d.has_schedule ? ''
+          : ' — hiện chưa nhập lịch tháng này nên chưa đối chiếu được'}.
+      </div>
+    </div>
+    <div class="fil">
+      <div class="f"><label>Nhân viên</label>
+        <select data-o="user_id" onchange="loadOffs()"><option value="">Tất cả</option>
+          ${d.users.map(u => `<option value="${u.id}" ${offQ.user_id == u.id ? 'selected' : ''}>${esc(u.name)}</option>`).join('')}
+        </select></div>
+      <div class="f"><label>Bộ phận</label>
+        <select data-o="department" onchange="loadOffs()"><option value="">Tất cả</option>
+          ${d.departments.map(x => `<option ${offQ.department === x ? 'selected' : ''}>${x}</option>`).join('')}
+        </select></div>
+      <div class="f"><label>Brand</label>
+        <select data-o="brand" onchange="loadOffs()"><option value="">Tất cả</option>
+          ${d.brands.map(x => `<option ${offQ.brand === x ? 'selected' : ''}>${x}</option>`).join('')}
+        </select></div>
+      <div class="f" style="min-width:168px"><label>Trạng thái</label>
+        <select data-o="filter" onchange="loadOffs()">
+          <option value="">Tất cả · ${d.counts.all}</option>
+          <option value="none" ${offQ.filter === 'none' ? 'selected' : ''}>Chưa đăng ký · ${d.counts.none}</option>
+          <option value="partial" ${offQ.filter === 'partial' ? 'selected' : ''}>Chưa đủ ${d.max} ngày · ${d.counts.partial}</option>
+          <option value="full" ${offQ.filter === 'full' ? 'selected' : ''}>Đủ ${d.max} ngày · ${d.counts.full}</option>
+          ${d.has_schedule ? `<option value="conflict" ${offQ.filter === 'conflict' ? 'selected' : ''}>Chưa đáp ứng nguyện vọng · ${d.counts.conflict}</option>` : ''}
+        </select></div>
+      <div class="f" style="min-width:150px"><label>Số ngày đã đăng ký</label>
+        <select data-o="filter2" onchange="offSetDays(this.value)">
+          <option value="">Tất cả</option>
+          ${d.counts.byDays.map((n, i) => `<option value="${i + 1}" ${offQ.filter == String(i + 1) ? 'selected' : ''}
+            ${n ? '' : 'disabled'}>${i + 1} ngày · ${n} người</option>`).join('')}
+        </select></div>
+      <button class="btn btn-sm" onclick="offClear()">Xóa lọc</button>
+    </div>
+    <div class="tw"><table>
+      <thead><tr><th class="wide">Nhân viên</th><th>Đăng ký</th><th class="wide">Ngày xin nghỉ</th>
+        <th>Đối chiếu lịch</th><th style="text-align:right">Xử lý</th></tr></thead>
+      <tbody>${trs || '<tr><td colspan="5" class="empty">Không có ai khớp bộ lọc.</td></tr>'}</tbody>
+    </table></div>
+    <div class="sub" style="margin-top:10px">${d.rows.length} nhân viên</div>`;
+}
+
+function offMove(delta) {
+  const [y, m] = offYm.split('-').map(Number);
+  const d = new Date(y, m - 1 + delta, 1);
+  offYm = `${d.getFullYear()}-${pad(d.getMonth() + 1)}`;
+  loadOffs();
+}
+
+async function offLock(locked) {
+  if (!confirm(locked ? `Khóa lịch off tháng ${offYm}? Nhân viên sẽ không tự sửa được.`
+                      : `Mở khóa tháng ${offYm}?`)) return;
+  const r = await api('/api/admin/offs/lock', { method: 'POST', body: { ym: offYm, locked } });
+  toast(r.ok ? 'Đã cập nhật' : 'Không cập nhật được', r.message || '', !!r.ok);
+  loadOffs();
+}
+
+async function admToggle(userId, day) {
+  const r = await api('/api/admin/offs/toggle', { method: 'POST', body: { user_id: userId, day } });
+  toast(r.ok ? 'Đã cập nhật' : 'Không cập nhật được', r.message || '', !!r.ok);
+  loadOffs();
+}
+
+async function admAdd(userId, name) {
+  const d = prompt(`Thêm ngày nghỉ cho ${name} (dạng ngày, ví dụ 15):`);
+  if (!d) return;
+  const day = `${offYm}-${pad(+d)}`;
+  admToggle(userId, day);
+}
+
+const PANES = { b:['tb','pb'], p:['tp','pp'], l:['tl','pl'], o:['to','po'], u:['tu','pu'], m:['tm','pm'] };
+function setTab(k) {
+  TAB = k;
+  Object.entries(PANES).forEach(([key, [btn, pane]]) => {
+    $('#' + btn).classList.toggle('on', key === k);
+    $('#' + pane).hidden = key !== k;
+  });
+  $('#exp').hidden = !(k === 'b' || k === 'p' || k === 'l');
+  if (k === 'b') renderBoard();
+  else if (k === 'p') loadPunches();
+  else if (k === 'l') loadLate();
+  else if (k === 'o') loadOffs();
+  else if (k === 'm') loadAdmins();
+  else renderUsers();
+}
+Object.entries(PANES).forEach(([k, [btn]]) => $('#' + btn).addEventListener('click', () => setTab(k)));
+$('#exp').addEventListener('click', () => {
+  location.href = (TAB === 'b' ? '/api/admin/export.csv?' : '/api/punches/export.csv?')
+    + (TAB === 'l' ? new URLSearchParams({ ...Object.fromEntries(new URLSearchParams(qp())), only_late: 1 }) : qp());
+});
+
+function tick() {
+  if (!B || TAB !== 'b') return;
+  const byId = {};
+  B.lanes.forEach(c => { if (c.holder) byId[c.holder.id] = c.holder; });
+  document.querySelectorAll('[data-cd]').forEach(el => {
+    const h = byId[el.dataset.cd]; if (!h) return;
+    const l = leftOf(h);
+    el.textContent = clk(l);
+    const lane = el.closest('.lane');
+    if (lane && l < 0) { lane.classList.add('over'); lane.classList.remove('busy'); }
+  });
+  document.querySelectorAll('[data-fill]').forEach(el => {
+    const h = byId[el.dataset.fill]; if (h) el.style.width = pctOf(h) + '%';
+  });
+}
+
+load();
+setInterval(tick, 1000);
+setInterval(load, 20000);
+</script>
+</body>
+</html>

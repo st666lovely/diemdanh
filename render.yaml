@@ -1,0 +1,33 @@
+services:
+  - type: web
+    name: tram-truc
+    runtime: node          # Node có sẵn — không cần Docker, không cần nginx
+    plan: starter          # KHÔNG dùng free: service ngủ sau 15 phút không có request,
+                           # request đầu tiên sau đó mất 30–60 giây mới tỉnh.
+    region: singapore      # gần Việt Nam nhất
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /healthz
+    disk:
+      name: data
+      mountPath: /var/data # SQLite nằm ở đây, sống sót qua mỗi lần deploy
+      sizeGB: 1
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: DATA_DIR
+        value: /var/data
+      - key: NODE_ENV
+        value: production
+      - key: TZ
+        value: Asia/Ho_Chi_Minh   # múi giờ máy chủ; giờ ca từng người theo khu vực VN/ARM riêng
+      - key: SESSION_SECRET
+        generateValue: true   # Render tự sinh, không cần tự nghĩ
+      - key: ADMIN_USER
+        value: admin
+      - key: ADMIN_PASSWORD
+        sync: false           # tự điền trong Dashboard, không lưu vào Git
+      - key: MAX_OFF_PER_MONTH
+        value: "15"           # số ngày off tối đa mỗi tháng
+      - key: MAX_OFF_PER_DAY_DEPT
+        value: "1"            # số người cùng bộ phận được nghỉ cùng một ngày

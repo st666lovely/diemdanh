@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Trạm trực</title>
+<meta name="theme-color" content="#F1F3F2">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Trạm trực">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="manifest" href="/manifest.webmanifest" id="mf">
+<link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png">
+<link rel="apple-touch-icon" href="/icon-180.png">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+
+<div class="toast hide" id="toast"><span class="b"></span>
+  <div><div class="tt" id="tt"></div><div class="ts" id="ts"></div></div></div>
+
+<div id="gate" class="gate" hidden></div>
+<div id="app" class="wrap" hidden></div>
+
+<script>
+/* Nếu đang mở qua /k/<key> thì trỏ manifest kèm key, để icon trên màn hình chính
+   mở đúng link của người này. Không làm vậy thì trên iPhone mở icon sẽ mất phiên. */
+(function () {
+  const m = location.pathname.match(/^\/k\/([A-Za-z0-9]+)/);
+  if (m) {
+    const el = document.getElementById('mf');
+    if (el) el.href = '/manifest.webmanifest?k=' + m[1].toUpperCase();
+  }
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
+  }
+})();
+
+const $ = s => document.querySelector(s);
+const pad = n => String(n).padStart(2, '0');
+const clk = s => (s < 0 ? '-' : '') + pad(Math.floor(Math.abs(s) / 60)) + ':' + pad(Math.abs(s) % 60);
+let TZ = null;   // múi giờ khu vực của nhân viên, server gửi xuống
+const fmtTz = (t, o) => new Intl.DateTimeFormat('en-GB',
+  { timeZone: TZ || undefined, hour12: false, ...o }).format(new Date(t));
+const hhmm = t => TZ ? fmtTz(t, { hour: '2-digit', minute: '2-digit' })
+                     : pad(new Date(t).getHours()) + ':' + pad(new Date(t).getMinutes());
+const DOW = ['Chủ Nhật','Thứ Hai','Thứ Ba','Thứ Tư','Thứ Năm','Thứ Sáu','Thứ Bảy'];
+const DOW_S = ['CN','T2','T3','T4','T5','T6','T7'];
+
+let S = null, skew = 0, busy = false, offYm = null;
+const nowMs = () => Date.now() + skew;
+const leftOf = i => Math.round((i.started_at + i.limit_minutes * 60000 - nowMs()) / 1000);
+const pctOf  = i => Math.min(100, ((nowMs() - i.started_at) / (i.limit_minutes * 60000)) * 100);
+
+function toast(t, s, ok) {
+  const el = $('#toast');
+  el.classList.toggle('err', !ok); el.classList.remove('hide');
+  $('#tt').textContent = t; $('#ts').textContent = s || '';
+  clearTimeout(toast._t); toast._t = setTimeout(() => el.classList.add('hide'), 4200);
+}
+
+/* ---------- Màn chặn ---------- */
+const GATES = {
+  nokey:  { ic: '⊘', h: 'Link không hợp lệ',
+    p: 'Link này không tồn tại hoặc đã bị thu hồi. Liên hệ quản lý để nhận link mới.' },
+  device: { ic: '⊗', h: 'Link đã gắn với thiết bị khác',
+    p: 'Mỗi link chỉ dùng được trên một thiết bị. Nếu bạn vừa đổi máy, nhờ quản lý gỡ thiết bị cũ giúp.' },
+  none:   { ic: '→', h: 'Cần link riêng để vào',
+    p: 'Mở link quản lý đã gửi cho bạn. Lưu vào màn hình chính để lần sau vào thẳng, không phải nhập gì.' },
+};
+function showGate(kind) {
+  const g = GATES[kind] || GATES.none;
+  $('#app').hidden = true; $('#gate').hidden = false;
+  $('#gate').innerHTML = `<div class="card">
+    <div class="ic">${g.ic}</div><h1>${g.h}</h1><p>${g.p}</p>
+    <p style="margin-top:22px;font-size:13px;color:var(--tx3)">Bạn là quản lý?
+      <a href="/admin" style="color:var(--pri);font-weight:600">Đăng nhập tại đây</a></p></div>`;
+}
+
+/* ---------- API ---------- */
+async function api(url, body, method) {
+  const r = await fetch(url, {
+    method: method || 'POST', headers: { 'Content-Type': 'application/json' },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  return { status: r.status, ...(await r.json().catch(() => ({}))) };
+}
+
+async function load() {
+  const r = await fetch('/api/state');
+  if (r.status === 401) { showGate(new URLSearchParams(location.search).get('e') || 'none'); return; }
+  const d = await r.json();
+  skew = d.server_time - Date.now();
+  S = d;
+  TZ = d.shift && d.shift.timezone ? d.shift.timezone : null;
+  if (!offYm) offYm = d.offs.ym;
+  $('#gate').hidden = true; $('#app').hidden = false;
+  render();
+}
+
+async function act(url, body) {
+  if (busy) return; busy = true;
+  const r = await api(url, body);
+  busy = false;
+  if (r.state) { S = r.state; skew = S.server_time - Date.now(); }
+  toast(r.ok ? 'Đã ghi nhận' : 'Chưa thực hiện được', r.message || '', !!r.ok);
+  await load();
+}
+
+async function punch(kind) {
+  if (busy) return; busy = true;
+  const r = await api('/api/punch', { kind });
+  busy = false;
+  if (r.device_mismatch) { toast('Sai thiết bị', r.message, false); return; }
+  toast(r.ok ? (r.late_level ? 'Đã ghi nhận — có trễ' : 'Đã ghi nhận') : 'Chưa thực hiện được',
+        r.message || '', r.ok && !r.late_level);
+  await load();
+}
+
+async function toggleOff(day) {
+  if (busy) return; busy = true;
+  const r = await api('/api/offs/toggle', { day });
+  busy = false;
+  toast(r.ok ? 'Đã cập nhật' : 'Chưa cập nhật được', r.message || '', !!r.ok);
+  if (r.ok) { const s = await fetch('/api/offs?ym=' + offYm); S.offs = await s.json(); render(); }
+}
+
+async function moveMonth(delta) {
+  const [y, m] = offYm.split('-').map(Number);
+  const d = new Date(y, m - 1 + delta, 1);
+  offYm = `${d.getFullYear()}-${pad(d.getMonth() + 1)}`;
+  const s = await fetch('/api/offs?ym=' + offYm);
+  S.offs = await s.json();
+  render();
+}
+
+/* ---------- Vẽ ---------- */
+function clockParts() {
+  const t = nowMs();
+  if (!TZ) { const d = new Date(t); return [pad(d.getHours()), pad(d.getMinutes()), pad(d.getSeconds())]; }
+  return fmtTz(t, { hour: '2-digit', minute: '2-digit', second: '2-digit' }).split(':');
+}
+function dateLine() {
+  const t = nowMs();
+  if (!TZ) { const d = new Date(t);
+    return `${DOW[d.getDay()]}, ${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()}`; }
+  const p = new Intl.DateTimeFormat('en-GB', { timeZone: TZ, weekday: 'short',
+    day: '2-digit', month: '2-digit', year: 'numeric' }).formatToParts(new Date(t));
+  const g = k => (p.find(x => x.type === k) || {}).value;
+  const wd = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 }[g('weekday')] ?? 0;
+  return `${DOW[wd]}, ${g('day')}/${g('month')}/${g('year')}`;
+}
+
+function heroCard(d, mine, left, over) {
+  return `<div class="card hero ${mine ? 'run' : ''} ${over ? 'over' : ''}" id="hero">
+    <div class="lb">${mine ? mine.type_name : 'Thời gian hiện tại'}</div>
+    <div class="big" id="big">${mine ? clk(left)
+      : (() => { const c = clockParts();
+          return `${c[0]}<span class="s">:</span>${c[1]}<span class="s">:</span>${c[2]}`; })()}</div>
+    <div class="sub" id="heroSub">${mine
+      ? `Bắt đầu ${hhmm(mine.started_at)} · cho phép ${mine.limit_minutes} phút`
+      : dateLine()}</div>
+    ${mine ? `<div class="bar-track"><i id="trk" style="width:${pctOf(mine)}%"></i></div>` : `
+      <div class="tags"><span class="pill">${S.me.department || '—'}</span>
+        ${S.me.brand ? `<span class="pill pri">${S.me.brand}</span>` : ''}
+        ${S.shift && S.shift.location ? `<span class="pill">${S.shift.location}</span>` : ''}</div>`}
+  </div>`;
+}
+
+/* Ca hôm nay: 3 nút chấm công + lịch sử bấm trong ngày */
+function shiftCard() {
+  const sh = S.shift;
+  const state = sh.on_shift
+    ? `<span class="pill pri"><span class="dot"></span>Đang trong ca từ ${hhmm(sh.checked_in_at)}</span>`
+    : (sh.checked_out_at
+        ? `<span class="pill">Đã xuống ca lúc ${hhmm(sh.checked_out_at)}</span>`
+        : (sh.has_shift ? `<span class="pill">Chưa lên ca</span>`
+                        : `<span class="pill">Hôm nay không có ca — bấm vẫn ghi nhận, không tính trễ</span>`));
+
+  return `<div class="card">
+    <div class="card-h"><span class="t">Ca hôm nay</span>
+      <span class="r">${sh.has_shift ? `${sh.shift_start}–${sh.shift_end} · giờ ${sh.location}`
+        : 'hôm nay nghỉ'}</span></div>
+    <div style="padding:14px 18px 4px">${state}</div>
+    <div class="punch">
+      <button class="pbtn ${sh.on_shift ? '' : 'go'}" onclick="punch('in')">
+        <span class="k">Bắt đầu</span>Lên ca</button>
+      <button class="pbtn ${sh.on_shift ? 'go' : ''}" onclick="punch('out')">
+        <span class="k">Kết thúc</span>Xuống ca</button>
+      <button class="pbtn" onclick="punch('log')">
+        <span class="k">Ghi nhận</span>Chấm công</button>
+    </div>
+    ${sh.rows.length ? `<div class="log">${sh.rows.slice().reverse().map(r => `
+      <div class="r"><span class="t">${hhmm(r.actual_at)}</span>
+        <span class="n">${r.kind_label}</span>
+        ${r.late_label ? `<span class="pill ${r.late_level === 'in5' ? 'amb' : 'red'}">${r.late_label}</span>`
+                       : `<span class="d">đúng giờ</span>`}</div>`).join('')}</div>` : ''}
+  </div>`;
+}
+
+function depCard(mine, locked) {
+  const holder = mine || locked;
+  const hLeft = holder ? leftOf(holder) : 0;
+  return `<div class="card"><div class="dep ${holder ? (hLeft < 0 ? 'over' : 'busy') : ''}">
+    <div class="ic">${(S.me.department || '?').slice(0, 2)}</div>
+    <div class="m">${holder
+      ? `<div class="a">${mine ? 'Bạn đang rời vị trí' : holder.user_name}</div>
+         <div class="b">${holder.type_name} · bộ phận đang khóa</div>`
+      : `<div class="a">Bộ phận đang trống</div>
+         <div class="b">${S.lane.headcount} nhân sự · bạn đi được</div>`}</div>
+    ${holder ? `<div class="cd" data-cd="${holder.id}">${clk(hLeft)}</div>` : ''}
+  </div></div>`;
+}
+
+function offCard() {
+  const o = S.offs;
+  const [y, m] = o.ym.split('-').map(Number);
+  const first = new Date(y, m - 1, 1);
+  const dim = new Date(y, m, 0).getDate();
+  const lead = first.getDay();
+  const today = new Date();
+  const isThis = today.getFullYear() === y && today.getMonth() + 1 === m;
+
+  // Ngày đã có đồng nghiệp cùng bộ phận nhận -> làm mờ ngay, khỏi bấm rồi mới báo lỗi
+  const takenBy = {};
+  (o.taken || []).forEach(t => { takenBy[t.day] = t.names.join(', '); });
+
+  const workSet = new Set(o.work_days || []);
+
+  let cells = '';
+  for (let i = 0; i < lead; i++) cells += '<div class="od blank"></div>';
+  for (let d = 1; d <= dim; d++) {
+    const day = `${o.ym}-${pad(d)}`;
+    const on = o.days.includes(day);                       // mình đã đăng ký
+    const hasShift = workSet.has(day);                     // lịch chính thức có xếp ca
+    const isToday = isThis && today.getDate() === d;
+    const busy = !on && takenBy[day];
+    const full = o.used >= o.max && !on;
+    const dis = o.locked || full || !!busy;
+
+    // 4 trạng thái: đăng ký & được duyệt / đăng ký nhưng vẫn phải làm /
+    // lịch cho nghỉ mà mình không xin / còn trống
+    let cls = '', tip = '';
+    if (on && o.has_schedule && hasShift) { cls = 'on rejected'; tip = 'Bạn xin nghỉ nhưng lịch vẫn xếp ca'; }
+    else if (on) { cls = 'on'; tip = o.has_schedule ? 'Đã được duyệt nghỉ' : 'Đã đăng ký, chờ xếp lịch'; }
+    else if (o.has_schedule && !hasShift) { cls = 'rosteroff'; tip = 'Lịch cho nghỉ (bạn không đăng ký)'; }
+    else if (busy) { cls = 'busy'; tip = `${takenBy[day]} đã nhận ngày này`; }
+
+    cells += `<button class="od ${cls} ${isToday ? 'today' : ''}"
+      ${dis ? 'disabled' : ''} ${tip ? `title="${tip}"` : ''}
+      onclick="toggleOff('${day}')">${d}</button>`;
+  }
+
+  return `<div class="card">
+    <div class="card-h"><span class="t">${o.has_schedule ? 'Lịch nghỉ' : 'Đăng ký nghỉ'}</span>
+      <span class="r">${o.locked ? '🔒 tháng đã khóa' : `đã chọn ${o.used}/${o.max} ngày`}</span></div>
+    ${o.has_schedule ? `<div class="offnote">
+      Lịch tháng này đã xếp xong. Bạn đăng ký ${o.used} ngày, được duyệt <b>${o.approved}</b> ngày${
+        o.rejected ? `, còn <b style="color:var(--red)">${o.rejected}</b> ngày vẫn phải làm` : ''}.
+      </div>` : `<div class="offnote">
+      Lịch tháng này chưa xếp. Đăng ký sớm để quản lý xếp ca theo nguyện vọng.
+      </div>`}
+    <div class="offnav">
+      <button class="btn btn-sm" onclick="moveMonth(-1)">‹</button>
+      <b>Tháng ${m}/${y}</b>
+      <button class="btn btn-sm" onclick="moveMonth(1)">›</button>
+    </div>
+    <div class="odow">${DOW_S.map(d => `<span>${d}</span>`).join('')}</div>
+    <div class="ogrid">${cells}</div>
+    <div class="offlegend">
+      <span><i class="sw on"></i>${o.has_schedule ? 'Được duyệt' : 'Đã đăng ký'}</span>
+      ${o.has_schedule ? '<span><i class="sw rejected"></i>Vẫn phải làm</span>' : ''}
+      ${o.has_schedule ? '<span><i class="sw rosteroff"></i>Lịch cho nghỉ</span>' : ''}
+      <span><i class="sw busy"></i>Người khác đã nhận</span>
+      <span><i class="sw"></i>Còn trống</span>
+    </div>
+    <div class="hint" style="margin:8px 0 16px">${o.locked
+      ? 'Quản lý đã khóa tháng này. Cần đổi thì báo quản lý.'
+      : `Chạm vào ngày để đăng ký hoặc bỏ. Tối đa ${o.max} ngày mỗi tháng,
+         và mỗi ngày bộ phận chỉ ${o.per_day} người nghỉ.`}</div>
+  </div>`;
+}
+
+const isIOS = /iP(hone|ad|od)/.test(navigator.userAgent)
+  || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const isStandalone = window.navigator.standalone === true
+  || (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
+
+/* Nhắc cài lên màn hình chính. Quan trọng: phải cài TRƯỚC khi bấm lần đầu,
+   vì lần bấm đầu tiên là lúc link gắn cứng vào thiết bị. */
+function installCard() {
+  if (isStandalone) return '';
+  if (localStorage.getItem('tt_hide_install') === '1') return '';
+  const bound = S.device && S.device.bound;
+
+  return `<div class="card install">
+    <div class="ic">⌂</div>
+    <div class="m">
+      <div class="a">Cài lên màn hình chính</div>
+      <div class="b">${isIOS
+        ? 'Bấm nút Chia sẻ ở thanh dưới → “Thêm vào MH chính”.'
+        : 'Mở menu ⋮ của trình duyệt → “Cài đặt ứng dụng” / “Thêm vào màn hình chính”.'}
+        ${bound ? '' : '<b> Cài xong rồi hãy bấm chấm công lần đầu</b> — lần bấm đầu tiên sẽ gắn link vào thiết bị.'}</div>
+    </div>
+    <button class="x" onclick="hideInstall()" aria-label="Ẩn">×</button>
+  </div>`;
+}
+function hideInstall() { localStorage.setItem('tt_hide_install', '1'); render(); }
+
+function render() {
+  const d = new Date(nowMs());
+  const mine = S.current, locked = S.locked_by;
+  const left = mine ? leftOf(mine) : 0, over = mine && left < 0;
+  const T = S.today;
+
+  const action = mine
+    ? `<div class="card card-p"><button class="btn btn-dark btn-block"
+        style="min-height:56px;font-size:17px;font-weight:700" onclick="act('/api/stop')">Dừng lại</button></div>`
+    : `<div class="card">
+        <div class="card-h"><span class="t">Rời vị trí</span></div>
+        ${locked ? `<div class="blocked" style="margin-top:14px">
+          <b>${locked.user_name}</b> đang “${locked.type_name}”. Chờ đến lượt rồi bấm lại.</div>` : ''}
+        <div class="acts">${S.types.map(t => `
+          <button class="act" ${t.disabled ? 'disabled' : ''} onclick="act('/api/start',{code:'${t.code}'})">
+            <div class="n">${t.name}</div>
+            <div class="d">${t.limit_minutes} phút${t.counts_toward_limit ? '' : ' · không khóa'}</div>
+          </button>`).join('')}</div></div>`;
+
+  $('#app').innerHTML = `
+    <div class="bar"><span class="nm">${S.me.name}</span><span class="sp"></span>
+      ${S.me.role === 'admin' ? '<a class="pill" href="/admin">Quản trị</a>' : ''}</div>
+    ${installCard()}
+    ${heroCard(d, mine, left, over)}
+    ${shiftCard()}
+    ${depCard(mine, locked)}
+    ${action}
+    <div class="card">
+      <div class="card-h"><span class="t">Rời vị trí hôm nay</span>
+        <span class="r">${T.count ? T.count + ' lượt' : 'chưa có lượt nào'}</span></div>
+      <div class="sum">
+        <div><div class="n">${T.count}</div><div class="l">Lượt</div></div>
+        <div><div class="n">${T.minutes}</div><div class="l">Phút</div></div>
+        <div><div class="n ${T.over ? 'red' : ''}">${T.over}</div><div class="l">Quá giờ</div></div>
+      </div>
+      ${T.rows.length ? `<div class="log">${T.rows.map(r => `
+        <div class="r"><span class="t">${hhmm(r.started_at)}</span>
+          <span class="n">${r.type_name}${r.closed_by === 'auto' ? ' · quên bấm dừng' : ''}</span>
+          <span class="d ${r.is_over_limit ? 'red' : ''}">${r.duration_sec == null ? 'đang chạy'
+            : Math.floor(r.duration_sec / 60) + 'p' + pad(r.duration_sec % 60)}</span></div>`).join('')}</div>` : ''}
+    </div>
+    ${offCard()}
+    <div class="hint">Mỗi bộ phận chỉ 1 người rời chỗ cùng lúc.<br>
+      Quên bấm “Dừng lại” thì hệ thống tự đóng sau khi quá giờ 30 phút và ghi chú lại.</div>`;
+}
+
+function tick() {
+  if (!S) return;
+  const mine = S.current, big = $('#big'), hero = $('#hero'), trk = $('#trk');
+  if (big) {
+    if (mine) {
+      const l = leftOf(mine);
+      big.textContent = clk(l);
+      hero.classList.toggle('over', l < 0);
+      if (trk) trk.style.width = pctOf(mine) + '%';
+      const sub = $('#heroSub');
+      if (sub && l < 0) sub.textContent = `Bắt đầu ${hhmm(mine.started_at)} · đã quá ${Math.floor(-l / 60)} phút`;
+    } else {
+      const c = clockParts();
+      big.innerHTML = `${c[0]}<span class="s">:</span>${c[1]}<span class="s">:</span>${c[2]}`;
+    }
+  }
+  document.querySelectorAll('[data-cd]').forEach(el => {
+    const h = (S.current && S.current.id == el.dataset.cd) ? S.current
+            : (S.locked_by && S.locked_by.id == el.dataset.cd) ? S.locked_by : null;
+    if (!h) return;
+    const l = leftOf(h);
+    el.textContent = clk(l);
+    const box = el.closest('.dep');
+    if (box && l < 0) { box.classList.add('over'); box.classList.remove('busy'); }
+  });
+}
+
+load();
+setInterval(tick, 1000);
+setInterval(load, 20000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) load(); });
+</script>
+</body>
+</html>
