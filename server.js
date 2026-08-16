@@ -84,10 +84,32 @@ function requireDevice(req, res, next) {
 }
 
 function requireAdmin(req, res, next) {
-  if (req.user.role !== 'admin') {
+  if (req.user.role !== 'admin' && req.user.role !== 'super') {
     return res.status(403).json({ ok: false, message: 'Chỉ quản trị xem được mục này.' });
   }
+  if (req.user.role === 'admin' && !req.user.brand) {
+    return res.status(403).json({ ok: false, message: 'Tài khoản quản trị chưa được gán brand. Liên hệ quản trị tổng.' });
+  }
+  req.scope = D.scopeOf(req.user);   // null = thấy tất cả
   next();
+}
+
+function requireSuper(req, res, next) {
+  if (req.user.role !== 'super') {
+    return res.status(403).json({ ok: false, message: 'Chỉ quản trị tổng làm được việc này.' });
+  }
+  next();
+}
+
+/* Lấy nhân viên theo id NHƯNG chặn nếu khác brand với quản trị đang thao tác.
+   Trả về null và tự gửi 404 để không lộ việc người đó có tồn tại hay không. */
+function targetUser(req, res) {
+  const u = D.db.prepare('SELECT * FROM users WHERE id=?').get(+req.params.id);
+  if (!u || !D.inScope(req.scope, u.brand)) {
+    res.status(404).json({ ok: false, message: 'Không tìm thấy nhân viên trong phạm vi quản lý của bạn.' });
+    return null;
+  }
+  return u;
 }
 
 /* --- Vào ca bằng link ---
@@ -131,7 +153,7 @@ app.get('/manifest.webmanifest', (req, res) => {
 /* --- Đăng nhập quản trị --- */
 app.post('/api/admin/login', (req, res) => {
   const { username, password } = req.body || {};
-  const u = D.db.prepare("SELECT * FROM users WHERE username=? AND role='admin' AND is_active=1")
+  const u = D.db.prepare("SELECT * FROM users WHERE username=? AND role IN ('admin','super') AND is_active=1")
     .get(String(username || '').trim());
   if (!u || !u.password_hash || !bcrypt.compareSync(String(password || ''), u.password_hash)) {
     return res.status(401).json({ ok: false, message: 'Sai tài khoản hoặc mật khẩu.' });
@@ -191,14 +213,19 @@ app.get('/api/admin/board', requireUser, requireAdmin, (req, res) => {
   D.sweepStale();
   res.json({
     server_time: Date.now(),
-    me: { name: req.user.name },
-    lanes: D.lanes(), users: D.allUsers(), types: D.types(),
-    departments: D.DEPTS, brands: D.BRANDS,
-    ...D.history(req.query),
+    me: { name: req.user.name, role: req.user.role, brand: req.user.brand },
+    scope: req.scope,
+    lanes: D.lanes(req.scope), users: D.allUsers(req.scope), types: D.types(),
+    departments: D.DEPTS, brands: req.scope ? [req.scope] : D.BRANDS,
+    ...D.history(req.query, req.scope),
   });
 });
 
 app.post('/api/admin/close/:id', requireUser, requireAdmin, (req, res) => {
+  const a = D.db.prepare('SELECT * FROM activities WHERE id=?').get(+req.params.id);
+  if (!a || !D.inScope(req.scope, a.brand)) {
+    return res.status(404).json({ ok: false, message: 'Không tìm thấy hoạt động trong phạm vi của bạn.' });
+  }
   const r = D.stopActivity(req.user, 'admin', +req.params.id);
   if (r.ok) D.audit(req.user, 'force_close', `activity #${req.params.id}`, req.ip);
   res.status(r.ok ? 200 : 409).json(r);
@@ -239,13 +266,17 @@ app.post('/api/admin/users', requireUser, requireAdmin, (req, res) => {
   if (!D.DEPTS.includes(b.department)) {
     return res.status(400).json({ ok: false, message: 'Bộ phận không hợp lệ.' });
   }
-  const brand = D.BRANDS.includes(b.brand) ? b.brand : null;
+  const brand = req.scope !== null ? req.scope
+    : (D.BRANDS.includes(b.brand) ? b.brand : null);
+  if (req.scope === null && !brand) {
+    return res.status(400).json({ ok: false, message: 'Chọn brand cho nhân viên này.' });
+  }
 
   const key = D.newKey();
   D.db.prepare(`INSERT INTO users (name,key,department,brand,role,created_at)
                 VALUES (?,?,?,?,'staff',?)`).run(name, key, b.department, brand, Date.now());
-  D.audit(req.user, 'user_create', name, req.ip);
-  res.json({ ok: true, message: `Đã thêm ${name}.`, users: D.allUsers() });
+  D.audit(req.user, 'user_create', `${name} (${brand})`, req.ip);
+  res.json({ ok: true, message: `Đã thêm ${name} vào ${brand}.`, users: D.allUsers(req.scope) });
 });
 
 app.post('/api/admin/users/bulk', requireUser, requireAdmin, (req, res) => {
@@ -259,25 +290,28 @@ app.post('/api/admin/users/bulk', requireUser, requireAdmin, (req, res) => {
       const p = line.split('|').map((s) => s.trim());
       if (!p[0]) continue;
       const dept = D.DEPTS.includes((p[1] || '').toUpperCase()) ? p[1].toUpperCase() : null;
-      const brand = D.BRANDS.includes((p[2] || '').toUpperCase()) ? p[2].toUpperCase() : null;
+      let brand = D.BRANDS.includes((p[2] || '').toUpperCase()) ? p[2].toUpperCase() : null;
+      if (req.scope !== null) brand = req.scope;   // admin theo brand chỉ thêm được người của brand mình
       if (!dept) { skipped.push(`${p[0]} — bộ phận không hợp lệ`); continue; }
+      if (!brand) { skipped.push(`${p[0]} — thiếu brand`); continue; }
       ins.run(p[0], D.newKey(), dept, brand, Date.now());
       created.push(p[0]);
     }
   })();
 
   D.audit(req.user, 'user_bulk', `${created.length} người`, req.ip);
-  res.json({ ok: true, created, skipped, users: D.allUsers() });
+  res.json({ ok: true, created, skipped, users: D.allUsers(req.scope) });
 });
 
 app.put('/api/admin/users/:id', requireUser, requireAdmin, (req, res) => {
   const b = req.body || {};
-  const u = D.db.prepare('SELECT * FROM users WHERE id=?').get(+req.params.id);
-  if (!u) return res.status(404).json({ ok: false, message: 'Không tìm thấy.' });
+  const u = targetUser(req, res); if (!u) return;
 
   const name = String(b.name || u.name).trim();
   const dept = D.DEPTS.includes(b.department) ? b.department : u.department;
-  const brand = b.brand === '' ? null : (D.BRANDS.includes(b.brand) ? b.brand : u.brand);
+  // Admin theo brand không được chuyển người sang brand khác
+  const brand = req.scope !== null ? u.brand
+    : (b.brand === '' ? null : (D.BRANDS.includes(b.brand) ? b.brand : u.brand));
   const active = b.is_active === undefined ? u.is_active : (b.is_active ? 1 : 0);
 
   if (u.id === req.user.id && !active) {
@@ -287,40 +321,37 @@ app.put('/api/admin/users/:id', requireUser, requireAdmin, (req, res) => {
   D.db.prepare('UPDATE users SET name=?,department=?,brand=?,is_active=? WHERE id=?')
     .run(name, dept, brand, active, u.id);
   D.audit(req.user, 'user_update', u.name, req.ip);
-  res.json({ ok: true, message: 'Đã cập nhật.', users: D.allUsers() });
+  res.json({ ok: true, message: 'Đã cập nhật.', users: D.allUsers(req.scope) });
 });
 
 /* Cấp lại key: link cũ chết ngay, thiết bị cũ bị gỡ. Dùng khi nhân viên đổi máy
    hoặc nghi có người dùng chung link. */
 app.post('/api/admin/users/:id/rekey', requireUser, requireAdmin, (req, res) => {
-  const u = D.db.prepare('SELECT * FROM users WHERE id=?').get(+req.params.id);
-  if (!u) return res.status(404).json({ ok: false, message: 'Không tìm thấy.' });
+  const u = targetUser(req, res); if (!u) return;
   const key = D.newKey();
   D.db.prepare('UPDATE users SET key=?, device_id=NULL, device_seen_at=NULL, device_ua=NULL WHERE id=?')
     .run(key, u.id);
   D.audit(req.user, 'rekey', u.name, req.ip);
-  res.json({ ok: true, message: `Đã cấp key mới cho ${u.name}. Link cũ không dùng được nữa.`, users: D.allUsers() });
+  res.json({ ok: true, message: `Đã cấp key mới cho ${u.name}. Link cũ không dùng được nữa.`, users: D.allUsers(req.scope) });
 });
 
 /* Gỡ thiết bị mà giữ nguyên key — nhân viên đổi điện thoại thì dùng cái này */
 app.post('/api/admin/users/:id/unbind', requireUser, requireAdmin, (req, res) => {
-  const u = D.db.prepare('SELECT * FROM users WHERE id=?').get(+req.params.id);
-  if (!u) return res.status(404).json({ ok: false, message: 'Không tìm thấy.' });
+  const u = targetUser(req, res); if (!u) return;
   D.db.prepare('UPDATE users SET device_id=NULL, device_seen_at=NULL, device_ua=NULL WHERE id=?').run(u.id);
   D.audit(req.user, 'unbind', u.name, req.ip);
-  res.json({ ok: true, message: `Đã gỡ thiết bị của ${u.name}. Link cũ vẫn dùng được trên máy mới.`, users: D.allUsers() });
+  res.json({ ok: true, message: `Đã gỡ thiết bị của ${u.name}. Link cũ vẫn dùng được trên máy mới.`, users: D.allUsers(req.scope) });
 });
 
 app.delete('/api/admin/users/:id', requireUser, requireAdmin, (req, res) => {
-  const u = D.db.prepare('SELECT * FROM users WHERE id=?').get(+req.params.id);
-  if (!u) return res.status(404).json({ ok: false, message: 'Không tìm thấy.' });
+  const u = targetUser(req, res); if (!u) return;
   if (u.id === req.user.id) {
     return res.status(400).json({ ok: false, message: 'Không thể xóa tài khoản của chính mình.' });
   }
   // Khóa thay vì xóa — xóa là mất luôn lịch sử hoạt động của người đó.
   D.db.prepare('UPDATE users SET is_active=0 WHERE id=?').run(u.id);
   D.audit(req.user, 'user_deactivate', u.name, req.ip);
-  res.json({ ok: true, message: `Đã khóa ${u.name}. Lịch sử vẫn giữ.`, users: D.allUsers() });
+  res.json({ ok: true, message: `Đã khóa ${u.name}. Lịch sử vẫn giữ.`, users: D.allUsers(req.scope) });
 });
 
 /* ============================================================
@@ -341,8 +372,8 @@ app.get('/api/punches', requireUser, (req, res) => {
     levels: D.LATE_LEVELS,
     departments: D.DEPTS,
     brands: D.BRANDS,
-    users: req.user.role === 'admin' ? D.allUsers().filter((u) => u.role === 'staff') : [],
-    is_admin: req.user.role === 'admin',
+    users: req.user.role === 'staff' ? [] : D.allUsers(D.scopeOf(req.user)).filter((u) => u.role === 'staff'),
+    is_admin: req.user.role !== 'staff',
   });
 });
 
@@ -353,8 +384,8 @@ app.get('/api/late', requireUser, (req, res) => {
     levels: D.LATE_LEVELS,
     departments: D.DEPTS,
     brands: D.BRANDS,
-    users: req.user.role === 'admin' ? D.allUsers().filter((u) => u.role === 'staff') : [],
-    is_admin: req.user.role === 'admin',
+    users: req.user.role === 'staff' ? [] : D.allUsers(D.scopeOf(req.user)).filter((u) => u.role === 'staff'),
+    is_admin: req.user.role !== 'staff',
   });
 });
 
@@ -398,9 +429,10 @@ app.post('/api/offs/toggle', requireUser, requireDevice, (req, res) => {
 /* --- Lịch off toàn team, chỉ quản trị --- */
 app.get('/api/admin/offs', requireUser, requireAdmin, (req, res) => {
   res.json({
-    ...D.offSummary(String(req.query.ym || thisYm()), req.query),
-    departments: D.DEPTS, brands: D.BRANDS,
-    users: D.allUsers().filter((u) => u.role === 'staff'),
+    ...D.offSummary(String(req.query.ym || thisYm()), req.query, req.scope),
+    departments: D.DEPTS, brands: req.scope ? [req.scope] : D.BRANDS,
+    users: D.allUsers(req.scope).filter((u) => u.role === 'staff'),
+    scope: req.scope,
   });
 });
 
@@ -408,7 +440,9 @@ app.get('/api/admin/offs', requireUser, requireAdmin, (req, res) => {
 app.post('/api/admin/offs/toggle', requireUser, requireAdmin, (req, res) => {
   const b = req.body || {};
   const u = D.db.prepare('SELECT * FROM users WHERE id=?').get(+b.user_id);
-  if (!u) return res.status(404).json({ ok: false, message: 'Không tìm thấy nhân viên.' });
+  if (!u || !D.inScope(req.scope, u.brand)) {
+    return res.status(404).json({ ok: false, message: 'Không tìm thấy nhân viên trong phạm vi của bạn.' });
+  }
   const r = D.toggleOff(u, String(b.day || ''), true);
   if (r.ok) D.audit(req.user, 'off_toggle', `${u.name} ${b.day}`, req.ip);
   res.status(r.ok ? 200 : 400).json(r);
@@ -419,6 +453,72 @@ app.post('/api/admin/offs/lock', requireUser, requireAdmin, (req, res) => {
   const r = D.setLock(String(b.ym || thisYm()), !!b.locked);
   D.audit(req.user, b.locked ? 'off_lock' : 'off_unlock', String(b.ym), req.ip);
   res.json(r);
+});
+
+/* --- Quản trị tổng: tạo và quản lý tài khoản quản trị từng brand --- */
+const RE_USERNAME = /^[a-zA-Z0-9._-]{3,32}$/;
+
+app.get('/api/admin/admins', requireUser, requireAdmin, requireSuper, (req, res) => {
+  res.json({
+    admins: D.db.prepare(
+      `SELECT id,name,username,brand,role,is_active FROM users
+       WHERE role IN ('admin','super') ORDER BY role DESC, brand, name`).all(),
+    brands: D.BRANDS,
+  });
+});
+
+app.post('/api/admin/admins', requireUser, requireAdmin, requireSuper, (req, res) => {
+  const b = req.body || {};
+  const name = String(b.name || '').trim();
+  const username = String(b.username || '').trim();
+
+  if (!name) return res.status(400).json({ ok: false, message: 'Thiếu tên hiển thị.' });
+  if (!RE_USERNAME.test(username)) {
+    return res.status(400).json({ ok: false, message: 'Tên đăng nhập 3–32 ký tự, chỉ chữ, số và . _ -' });
+  }
+  if (String(b.password || '').length < 8) {
+    return res.status(400).json({ ok: false, message: 'Mật khẩu cần ít nhất 8 ký tự.' });
+  }
+  if (!D.BRANDS.includes(b.brand)) {
+    return res.status(400).json({ ok: false, message: 'Chọn brand cho tài khoản quản trị này.' });
+  }
+
+  try {
+    D.db.prepare(
+      `INSERT INTO users (name,key,username,password_hash,brand,role,department,created_at)
+       VALUES (?,?,?,?,?,'admin','RISK',?)`
+    ).run(name, D.newKey(), username, bcrypt.hashSync(b.password, 10), b.brand, Date.now());
+  } catch (e) {
+    return res.status(409).json({ ok: false, message: 'Tên đăng nhập đã tồn tại.' });
+  }
+
+  D.audit(req.user, 'admin_create', `${username} (${b.brand})`, req.ip);
+  res.json({ ok: true, message: `Đã tạo quản trị ${name} cho brand ${b.brand}.` });
+});
+
+app.put('/api/admin/admins/:id', requireUser, requireAdmin, requireSuper, (req, res) => {
+  const b = req.body || {};
+  const u = D.db.prepare("SELECT * FROM users WHERE id=? AND role IN ('admin','super')").get(+req.params.id);
+  if (!u) return res.status(404).json({ ok: false, message: 'Không tìm thấy tài khoản quản trị.' });
+  if (u.id === req.user.id && b.is_active === false) {
+    return res.status(400).json({ ok: false, message: 'Không thể tự khóa tài khoản của mình.' });
+  }
+
+  if (b.password) {
+    if (String(b.password).length < 8) {
+      return res.status(400).json({ ok: false, message: 'Mật khẩu cần ít nhất 8 ký tự.' });
+    }
+    D.db.prepare('UPDATE users SET password_hash=? WHERE id=?').run(bcrypt.hashSync(b.password, 10), u.id);
+  }
+  if (u.role === 'admin' && D.BRANDS.includes(b.brand)) {
+    D.db.prepare('UPDATE users SET brand=? WHERE id=?').run(b.brand, u.id);
+  }
+  if (b.is_active !== undefined) {
+    D.db.prepare('UPDATE users SET is_active=? WHERE id=?').run(b.is_active ? 1 : 0, u.id);
+  }
+
+  D.audit(req.user, 'admin_update', u.username, req.ip);
+  res.json({ ok: true, message: 'Đã cập nhật tài khoản quản trị.' });
 });
 
 /* --- Nhập lịch ca tháng từ file Excel/CSV ---
@@ -448,7 +548,7 @@ app.post('/api/admin/schedule/import',
     // Xem trước: đối chiếu với danh sách nhân sự, chưa ghi gì vào database
     if (mode === 'preview') {
       const names = parsed.rows.map((r) => r.name || r.key);
-      const known = D.allUsers().filter((u) => u.role === 'staff');
+      const known = D.allUsers(req.scope).filter((u) => u.role === 'staff');
       const missing = parsed.rows.filter((r) =>
         !known.some((u) => (r.key && u.key === r.key.toUpperCase()) || (r.name && u.name === r.name))
       ).map((r) => r.name || r.key);
@@ -460,7 +560,7 @@ app.post('/api/admin/schedule/import',
       });
     }
 
-    const r = D.applySchedule(parsed, mode);
+    const r = D.applySchedule(parsed, mode, req.scope);
     D.audit(req.user, 'schedule_import', `${r.ym} ${mode} ${r.matched.length} người / ${r.dayCount} ngày`, req.ip);
 
     res.json({
@@ -474,20 +574,21 @@ app.post('/api/admin/schedule/import',
 /* --- Xem lịch tháng đã nhập --- */
 app.get('/api/admin/schedule', requireUser, requireAdmin, (req, res) => {
   const ym = String(req.query.ym || new Date().toISOString().slice(0, 7));
-  const out = D.scheduleSummary(ym);
+  const out = D.scheduleSummary(ym, req.scope);
   if (req.query.user_id) out.detail = D.scheduleOf(+req.query.user_id, ym);
   res.json(out);
 });
 
 /* --- Đổi khu vực (múi giờ) của nhân viên --- */
 app.put('/api/admin/users/:id/location', requireUser, requireAdmin, (req, res) => {
+  const u = targetUser(req, res); if (!u) return;
   const loc = String((req.body || {}).location || '').toUpperCase();
   if (!D.LOCATIONS.includes(loc)) {
     return res.status(400).json({ ok: false, message: 'Khu vực phải là ' + D.LOCATIONS.join(' hoặc ') + '.' });
   }
   D.db.prepare('UPDATE users SET location=? WHERE id=?').run(loc, +req.params.id);
   D.audit(req.user, 'location_update', `#${req.params.id} -> ${loc}`, req.ip);
-  res.json({ ok: true, message: `Đã đổi khu vực sang ${loc} (${D.tzOf(loc)}).`, users: D.allUsers() });
+  res.json({ ok: true, message: `Đã đổi khu vực sang ${loc} (${D.tzOf(loc)}).`, users: D.allUsers(req.scope) });
 });
 
 /* ============================================================
