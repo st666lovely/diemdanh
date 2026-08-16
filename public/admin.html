@@ -494,9 +494,31 @@ function qp() {
 
 const KIND_PILL = { in: 'pri', out: 'amb', log: '' };
 
-function punchTable(d, showLateFilter) {
-  const sel = (k, o, ph) => `<select data-p="${k}" onchange="${showLateFilter ? 'loadLate()' : 'loadPunches()'}">
+/* Thanh lọc dùng chung cho hai tab, chỉ khác một ô ở giữa */
+function punchFilters(d, mode) {
+  const fn = mode === 'late' ? 'loadLate()' : 'loadPunches()';
+  const sel = (k, o, ph) => `<select data-p="${k}" onchange="${fn}">
     <option value="">${ph}</option>${o}</select>`;
+
+  return `<div class="fil">
+    ${d.is_admin ? `<div class="f"><label>Nhân viên</label>${sel('user_id',
+      d.users.map(u => `<option value="${u.id}">${esc(u.name)}</option>`).join(''), 'Tất cả')}</div>` : ''}
+    ${mode === 'late'
+      ? `<div class="f"><label>Mức trễ</label>${sel('late_level',
+          Object.entries(d.levels).map(([k, v]) => `<option value="${k}">${v.label}</option>`).join(''), 'Tất cả')}</div>`
+      : `<div class="f"><label>Loại</label>${sel('kind',
+          Object.entries(d.kinds).map(([k, v]) => `<option value="${k}">${v}</option>`).join(''), 'Tất cả')}</div>`}
+    <div class="f"><label>Bộ phận</label>${sel('department',
+      d.departments.map(x => `<option>${x}</option>`).join(''), 'Tất cả')}</div>
+    ${d.brands.length > 1 ? `<div class="f"><label>Brand</label>${sel('brand',
+      d.brands.map(x => `<option>${x}</option>`).join(''), 'Tất cả')}</div>` : ''}
+    <div class="f"><label>Từ ngày</label><input type="date" data-p="from" onchange="${fn}"></div>
+    <div class="f"><label>Đến ngày</label><input type="date" data-p="to" onchange="${fn}"></div>
+    <button class="btn btn-sm" onclick="clearP('${mode}')">Xóa lọc</button>
+  </div>`;
+}
+
+function punchTable(d, showLateFilter) {
 
   const trs = d.rows.map(r => `<tr>
     <td class="wide"><div style="font-weight:600">${esc(r.user_name)}</div>
@@ -514,29 +536,12 @@ function punchTable(d, showLateFilter) {
 
   return `
     <div class="kpis">
-      <div class="kpi"><div class="n">${d.stats.total}</div><div class="l">Lượt khớp bộ lọc</div></div>
-      <div class="kpi amb"><div class="n">${d.stats.in5}</div><div class="l">Trễ lên ca ~5p</div></div>
-      <div class="kpi red"><div class="n">${d.stats.in30}</div><div class="l">Trễ lên ca ~30p</div></div>
-      <div class="kpi red"><div class="n">${d.stats.out60}</div><div class="l">Trễ xuống ca ~60p</div></div>
+      <div class="kpi"><div class="n">${d.stats.total}</div><div class="l">Tổng lượt bấm</div></div>
+      <div class="kpi"><div class="n">${d.stats.kind_in}</div><div class="l">Lên ca</div></div>
+      <div class="kpi"><div class="n">${d.stats.kind_out}</div><div class="l">Xuống ca</div></div>
+      <div class="kpi ${d.stats.late ? 'red' : ''}"><div class="n">${d.stats.late}</div><div class="l">Có trễ</div></div>
     </div>
-    <div class="fil">
-      ${d.is_admin ? `<div class="f"><label>Nhân viên</label>${sel('user_id',
-        d.users.map(u => `<option value="${u.id}">${esc(u.name)}</option>`).join(''), 'Tất cả')}</div>` : ''}
-      ${showLateFilter
-        ? `<div class="f"><label>Mức trễ</label>${sel('late_level',
-            Object.entries(d.levels).map(([k, v]) => `<option value="${k}">${v.label}</option>`).join(''), 'Tất cả')}</div>`
-        : `<div class="f"><label>Loại</label>${sel('kind',
-            Object.entries(d.kinds).map(([k, v]) => `<option value="${k}">${v}</option>`).join(''), 'Tất cả')}</div>`}
-      <div class="f"><label>Bộ phận</label>${sel('department',
-        d.departments.map(x => `<option>${x}</option>`).join(''), 'Tất cả')}</div>
-      <div class="f"><label>Brand</label>${sel('brand',
-        d.brands.map(x => `<option>${x}</option>`).join(''), 'Tất cả')}</div>
-      <div class="f"><label>Từ ngày</label><input type="date" data-p="from"
-        onchange="${showLateFilter ? 'loadLate()' : 'loadPunches()'}"></div>
-      <div class="f"><label>Đến ngày</label><input type="date" data-p="to"
-        onchange="${showLateFilter ? 'loadLate()' : 'loadPunches()'}"></div>
-      <button class="btn btn-sm" onclick="clearP('${showLateFilter ? 'l' : 'p'}')">Xóa lọc</button>
-    </div>
+    ${punchFilters(d, 'punch')}
     <div class="tw"><table>
       <thead><tr><th class="wide">Nhân viên</th><th>Loại</th><th>Giờ bấm</th><th>Theo lịch</th>
         <th>Mức trễ</th><th>IP</th></tr></thead>
@@ -546,9 +551,62 @@ function punchTable(d, showLateFilter) {
     <div class="sub" style="margin-top:10px">${d.rows.length} bản ghi hiển thị</div>`;
 }
 
-function clearP(which) {
+function clearP(mode) {
   document.querySelectorAll('[data-p]').forEach(e => e.value = '');
-  which === 'l' ? loadLate() : loadPunches();
+  mode === 'late' ? loadLate() : loadPunches();
+}
+
+/* ---------- Tab Trễ: ai trễ nhiều, không phải nhật ký từng lượt ---------- */
+function lateTable(d) {
+  const bar = (n, total) => total ? Math.round((n / total) * 100) : 0;
+  const worst = Math.max(1, ...d.rows.map(r => r.total_minutes));
+
+  const trs = d.rows.map((r, i) => `<tr>
+    <td style="text-align:center;color:var(--tx3);font-weight:700">${i + 1}</td>
+    <td class="wide"><div style="font-weight:600">${esc(r.user_name)}</div>
+      <div style="margin-top:5px;display:inline-flex;gap:5px">
+        <span class="pill">${r.department || '—'}</span>
+        ${r.brand ? `<span class="pill pri">${r.brand}</span>` : ''}</div></td>
+    <td style="text-align:center">${r.in5 ? `<span class="pill amb">${r.in5}</span>` : '<span class="sub">—</span>'}</td>
+    <td style="text-align:center">${r.in30 ? `<span class="pill red">${r.in30}</span>` : '<span class="sub">—</span>'}</td>
+    <td style="text-align:center">${r.out60 ? `<span class="pill red">${r.out60}</span>` : '<span class="sub">—</span>'}</td>
+    <td style="text-align:center;font-weight:700">${r.times}</td>
+    <td style="min-width:150px">
+      <div style="font-weight:700">${r.total_minutes} phút</div>
+      <div class="lbar"><i style="width:${bar(r.total_minutes, worst)}%"></i></div>
+      <div class="sub">lần nặng nhất ${r.worst_minutes} phút</div></td>
+    <td class="sub">${dmy(r.last_at)}</td>
+    <td style="text-align:right"><button class="btn btn-sm" onclick="lateDetail(${r.id},'${esc(r.user_name).replace(/'/g, "\\'")}')">Xem lượt</button></td>
+  </tr>`).join('');
+
+  return `
+    <div class="kpis">
+      <div class="kpi red"><div class="n">${d.stats.people}</div><div class="l">Nhân viên có trễ</div></div>
+      <div class="kpi"><div class="n">${d.stats.times}</div><div class="l">Tổng lượt trễ</div></div>
+      <div class="kpi amb"><div class="n">${d.stats.minutes}</div><div class="l">Tổng số phút trễ</div></div>
+      <div class="kpi red"><div class="n">${d.stats.heavy}</div><div class="l">Lượt trễ nặng</div></div>
+    </div>
+    ${punchFilters(d, 'late')}
+    <div class="tw"><table>
+      <thead><tr><th style="width:40px;text-align:center">#</th><th class="wide">Nhân viên</th>
+        <th style="text-align:center">~5p</th><th style="text-align:center">~30p</th>
+        <th style="text-align:center">Xuống ca</th><th style="text-align:center">Tổng lượt</th>
+        <th>Tổng phút trễ</th><th>Gần nhất</th><th></th></tr></thead>
+      <tbody>${trs || '<tr><td colspan="9" class="empty">Không có ai trễ theo bộ lọc này.</td></tr>'}</tbody>
+    </table></div>
+    <div class="sub" style="margin-top:10px">Xếp theo mức nghiêm trọng: trễ nặng trước, rồi tới tổng số phút</div>`;
+}
+
+async function lateDetail(userId, name) {
+  const p = new URLSearchParams(qp());
+  p.set('detail', '1'); p.set('user_id', userId);
+  const d = await fetch('/api/late?' + p).then(r => r.json());
+  $('#pl').innerHTML = `
+    <div class="head" style="margin-bottom:14px">
+      <div><h1 style="font-size:19px">Các lượt trễ của ${esc(name)}</h1>
+        <p>${d.rows.length} lượt</p></div>
+      <div class="sp"><button class="btn btn-sm" onclick="loadLate()">← Về danh sách</button></div>
+    </div>` + punchTable(d, true).replace(/<div class="kpis">[\s\S]*?<\/div>\s*<div class="fil">[\s\S]*?<\/div>/, '');
 }
 
 async function loadPunches() {
@@ -560,7 +618,8 @@ async function loadPunches() {
 async function loadLate() {
   const r = await fetch('/api/late?' + qp());
   if (r.status === 401) return location.reload();
-  $('#pl').innerHTML = punchTable(await r.json(), true);
+  const d = await r.json();
+  $('#pl').innerHTML = d.detail ? punchTable(d, true) : lateTable(d);
 }
 
 /* ---------- Lịch off ---------- */
