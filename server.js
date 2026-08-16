@@ -365,25 +365,40 @@ app.post('/api/punch', requireUser, requireDevice, (req, res) => {
 });
 
 /* --- Lịch sử chấm công. Nhân viên chỉ thấy của mình, quản trị thấy hết. --- */
+/* Danh sách brand cho ô lọc: nhân viên không cần, admin chỉ brand mình, super cả hai */
+function brandOptions(user) {
+  if (user.role === 'staff') return [];
+  const scope = D.scopeOf(user);
+  return scope === null ? D.BRANDS : (D.BRANDS.includes(scope) ? [scope] : []);
+}
+
 app.get('/api/punches', requireUser, (req, res) => {
   res.json({
     ...D.punchHistory(req.query, req.user),
     kinds: D.PUNCH_KINDS,
     levels: D.LATE_LEVELS,
     departments: D.DEPTS,
-    brands: D.BRANDS,
+    brands: brandOptions(req.user),
     users: req.user.role === 'staff' ? [] : D.allUsers(D.scopeOf(req.user)).filter((u) => u.role === 'staff'),
     is_admin: req.user.role !== 'staff',
   });
 });
 
-/* --- Danh sách trễ: cùng nguồn dữ liệu, ép lọc chỉ lấy bản ghi có mức trễ --- */
+/* --- Danh sách trễ ---
+   Mặc định trả bảng TỔNG HỢP THEO NGƯỜI (ai trễ nhiều), vì đó là thứ quản lý cần.
+   Thêm ?detail=1 để xem nhật ký từng lượt của một người. */
 app.get('/api/late', requireUser, (req, res) => {
+  const scope = D.scopeOf(req.user);
+  const detail = req.query.detail === '1' || req.user.role === 'staff';
+
   res.json({
-    ...D.punchHistory({ ...req.query, only_late: 1 }, req.user),
+    detail,
+    ...(detail
+      ? D.punchHistory({ ...req.query, only_late: 1 }, req.user)
+      : D.lateByUser(req.query, scope === null ? null : scope)),
     levels: D.LATE_LEVELS,
     departments: D.DEPTS,
-    brands: D.BRANDS,
+    brands: brandOptions(req.user),
     users: req.user.role === 'staff' ? [] : D.allUsers(D.scopeOf(req.user)).filter((u) => u.role === 'staff'),
     is_admin: req.user.role !== 'staff',
   });
