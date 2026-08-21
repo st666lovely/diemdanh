@@ -796,7 +796,7 @@ function setLock(ym, locked) {
    ============================================================ */
 function applySchedule(parsed, mode = 'merge', scope = null) {
   const { ym, rows } = parsed;
-  const matched = [], missing = [], outside = [];
+  const matched = [], missing = [], outside = [], keySet = [];
 
   const byKey = db.prepare("SELECT * FROM users WHERE key=? AND role='staff'");
   const byName = db.prepare("SELECT * FROM users WHERE name=? AND role='staff'");
@@ -838,6 +838,14 @@ function applySchedule(parsed, mode = 'merge', scope = null) {
       if (scope !== null) br = user.brand;   // admin theo brand không được chuyển người sang brand khác
       updMeta.run(loc, dep, br, user.id);
 
+      // Mã cá nhân đi kèm trong file: băm rồi lưu, số gốc không giữ lại đâu cả
+      if (rec.personal_key && KEY_RE.test(rec.personal_key)) {
+        db.prepare('UPDATE users SET key_hash=?, key_month=?, key_set_at=? WHERE id=?')
+          .run(bcryptLib.hashSync(rec.personal_key, 10),
+               rec.key_month || null, now(), user.id);
+        keySet.push(user.name);
+      }
+
       for (const [day, t] of Object.entries(rec.days)) {
         ins.run(user.id, day, t.start, t.end);
         dayCount++;
@@ -845,7 +853,7 @@ function applySchedule(parsed, mode = 'merge', scope = null) {
     }
   })();
 
-  return { ym, mode, matched, missing, outside, dayCount, errors: parsed.errors };
+  return { ym, mode, matched, missing, outside, keySet, dayCount, errors: parsed.errors };
 }
 
 /* Lịch tháng của một người, để hiển thị */
