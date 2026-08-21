@@ -100,17 +100,20 @@ function parseScheduleFile(buffer, ym) {
     const who = rec.name || rec.key || `dòng ${r + 1}`;
     if (!rec.key && !rec.name) { errors.push(`Dòng ${r + 1}: thiếu cả Mã lẫn Tên, đã bỏ qua.`); continue; }
 
-    // Excel hay cắt số 0 đầu, ví dụ 05260 thành 5260 — đệm lại cho đủ 5 chữ số
-    if (rec.personal_key) {
-      const raw = String(rec.personal_key).replace(/\D/g, '');
+    // Mã cá nhân do quản lý tự đặt: chữ, số, ký hiệu đều được.
+    // Lưu ý Excel tự cắt số 0 đầu nếu ô để dạng số — cột này nên định dạng Text.
+    if (rec.personal_key !== '' && rec.personal_key != null) {
+      const raw = String(rec.personal_key).trim();
       if (!raw) {
-        errors.push(`${who}: mã cá nhân không đọc được, đã bỏ qua cột này.`);
         rec.personal_key = '';
-      } else if (raw.length > 5) {
-        errors.push(`${who}: mã cá nhân "${rec.personal_key}" dài quá 5 số, đã bỏ qua.`);
+      } else if (/\s/.test(raw)) {
+        errors.push(`${who}: mã cá nhân "${raw}" có khoảng trắng, đã bỏ qua.`);
+        rec.personal_key = '';
+      } else if (raw.length < 4 || raw.length > 32) {
+        errors.push(`${who}: mã cá nhân "${raw}" cần 4–32 ký tự, đã bỏ qua.`);
         rec.personal_key = '';
       } else {
-        rec.personal_key = raw.padStart(5, '0');
+        rec.personal_key = raw;
       }
     }
     if (rec.key_month && !/^\d{4}-\d{2}$/.test(String(rec.key_month).trim())) {
