@@ -623,8 +623,9 @@ app.post('/api/admin/schedule/import',
       ).map((r) => r.name || r.key);
 
       const dayCount = parsed.rows.reduce((n, r) => n + Object.keys(r.days).length, 0);
+      const keyCount = parsed.rows.filter((r) => r.personal_key).length;
       return res.json({
-        ok: true, preview: true, ym: parsed.ym, count: parsed.count, dayCount,
+        ok: true, preview: true, ym: parsed.ym, count: parsed.count, dayCount, keyCount,
         matched: names.filter((n) => !missing.includes(n)), missing, errors: parsed.errors,
       });
     }
@@ -636,6 +637,7 @@ app.post('/api/admin/schedule/import',
       ok: true, ...r,
       message: `Đã áp lịch tháng ${r.ym} (${mode === 'replace' ? 'ghi đè' : 'merge'}): `
         + `${r.matched.length} người, ${r.dayCount} ngày làm.`
+        + (r.keySet.length ? ` Đặt mã cá nhân cho ${r.keySet.length} người.` : '')
         + (r.missing.length ? ` Không khớp ${r.missing.length} người: ${r.missing.slice(0, 5).join(', ')}.` : ''),
     });
   });
