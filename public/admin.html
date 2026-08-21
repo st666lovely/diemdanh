@@ -285,11 +285,13 @@ function renderUsers() {
       </div>
       <div id="schOut" class="sub" style="margin-top:10px;line-height:1.6"></div>
       <div class="note" style="font-size:12.5px;color:var(--tx3);margin-top:8px;line-height:1.55">
-        Một dòng một người, mỗi ngày trong tháng một cột:
-        <span class="mono">Ma | Ten | KhuVuc | BoPhan | Brand | 1 | 2 | … | 31</span>.
+        Một dòng một người, mỗi ngày trong tháng một cột:<br>
+        <span class="mono">Ma | Ten | KhuVuc | BoPhan | Brand | MaCaNhan | ThangLuong | 1 | 2 | … | 31</span>.
         Ô ghi <span class="mono">08:00-16:00</span>, để trống hoặc <span class="mono">OFF</span> là nghỉ.
         Giờ trong file là <b>giờ địa phương</b> của người đó — KhuVuc <span class="mono">VN</span> hay
-        <span class="mono">ARM</span> quyết định múi giờ. Dùng chung được file của bot Telegram,
+        <span class="mono">ARM</span> quyết định múi giờ.
+        Cột <span class="mono">MaCaNhan</span> là 5 số lấy từ lương tháng trước; để trống thì giữ mã cũ.
+        Hệ thống băm ngay khi nhận, không lưu số gốc. Dùng chung được file của bot Telegram,
         chỉ cần đổi cột TelegramID thành cột <span class="mono">Ma</span>.
       </div>
     </div>
@@ -378,7 +380,8 @@ async function schImport(mode) {
 
   const parts = [];
   if (r.preview) {
-    parts.push(`<b>Xem trước tháng ${r.ym}:</b> ${r.count} người · ${r.dayCount} ngày làm.`);
+    parts.push(`<b>Xem trước tháng ${r.ym}:</b> ${r.count} người · ${r.dayCount} ngày làm`
+      + (r.keyCount ? ` · ${r.keyCount} mã cá nhân` : ' · không có mã cá nhân nào') + '.');
     if (r.matched.length) parts.push(`Khớp: ${r.matched.slice(0, 10).map(esc).join(', ')}${r.matched.length > 10 ? '…' : ''}`);
   } else {
     parts.push(`<b style="color:var(--pri)">${esc(r.message)}</b>`);
