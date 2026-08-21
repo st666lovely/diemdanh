@@ -886,11 +886,13 @@ function scheduleSummary(ym, scope = null) {
    Quản lý nhập giúp từng người, hệ thống chỉ lưu bản băm.
    ============================================================ */
 const bcryptLib = require("bcryptjs");
-const KEY_RE = /^\d{5}$/;
+// Quản lý tự quyết nội dung mã: chữ, số, ký hiệu đều được. Chỉ chặn khoảng trắng
+// và mã quá ngắn. Ví dụ "x2560", "HA-0825", "52560" đều hợp lệ.
+const KEY_RE = /^\S{4,32}$/;
 
 function setPersonalKey(userId, key, month) {
   if (!KEY_RE.test(String(key || ""))) {
-    return { ok: false, message: "Mã cá nhân phải đúng 5 chữ số." };
+    return { ok: false, message: "Mã cá nhân cần 4–32 ký tự, không chứa khoảng trắng." };
   }
   const u = db.prepare("SELECT * FROM users WHERE id=?").get(userId);
   if (!u) return { ok: false, message: "Không tìm thấy nhân viên." };
@@ -909,7 +911,7 @@ function hasPersonalKey(user) {
 function checkPersonalKey(user, key) {
   if (!user.key_hash) return { ok: true, skipped: true };
   if (!KEY_RE.test(String(key || ""))) {
-    return { ok: false, message: "Nhập mã cá nhân 5 chữ số." };
+    return { ok: false, message: "Nhập mã cá nhân của bạn." };
   }
   if (!bcryptLib.compareSync(String(key), user.key_hash)) {
     return { ok: false, message: "Mã cá nhân không đúng." };
