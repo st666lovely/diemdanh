@@ -196,8 +196,6 @@ function toast(t, s, ok) {
 const GATES = {
   nokey:  { ic: '⊘', h: 'Link không hợp lệ',
     p: 'Link này không tồn tại hoặc đã bị thu hồi. Liên hệ quản lý để nhận link mới.' },
-  device: { ic: '⊗', h: 'Link đã gắn với thiết bị khác',
-    p: 'Mỗi link chỉ dùng được trên một thiết bị. Nếu bạn vừa đổi máy, nhờ quản lý gỡ thiết bị cũ giúp.' },
   none:   { ic: '→', h: 'Cần link riêng để vào',
     p: 'Mở link quản lý đã gửi cho bạn. Lưu vào màn hình chính để lần sau vào thẳng, không phải nhập gì.' },
 };
@@ -215,7 +213,7 @@ function showGate(kind) {
    không ai đưa cho đồng nghiệp — đó là lý do dùng nó thay vì PIN thường. */
 function askKey(việc) {
   if (!S || !S.key || !S.key.required) return '';
-  const k = prompt(`Nhập mã cá nhân để ${việc}\n(5 chữ số lấy từ lương tháng trước)`);
+  const k = prompt(`Nhập mã cá nhân để ${việc}`);
   return k === null ? null : String(k).trim();
 }
 
@@ -261,7 +259,6 @@ async function punch(kind) {
   busy = true;
   const r = await api('/api/punch', { kind, key: k });
   busy = false;
-  if (r.device_mismatch) { toast('Sai thiết bị', r.message, false); return; }
   if (r.key_required) { toast('Mã cá nhân', r.message, false); return; }
   toast(r.ok ? (r.late_level ? 'Đã ghi nhận — có trễ' : 'Đã ghi nhận') : 'Chưa thực hiện được',
         r.message || '', r.ok && !r.late_level);
@@ -472,8 +469,6 @@ async function turnOnSound() {
 function installCard() {
   if (isStandalone) return '';
   if (localStorage.getItem('tt_hide_install') === '1') return '';
-  const bound = S.device && S.device.bound;
-
   return `<div class="card install">
     <div class="ic">⌂</div>
     <div class="m">
@@ -481,7 +476,7 @@ function installCard() {
       <div class="b">${isIOS
         ? 'Bấm nút Chia sẻ ở thanh dưới → “Thêm vào MH chính”.'
         : 'Mở menu ⋮ của trình duyệt → “Cài đặt ứng dụng” / “Thêm vào màn hình chính”.'}
-        ${bound ? '' : '<b> Cài xong rồi hãy bấm chấm công lần đầu</b> — lần bấm đầu tiên sẽ gắn link vào thiết bị.'}</div>
+        </div>
     </div>
     <button class="x" onclick="hideInstall()" aria-label="Ẩn">×</button>
   </div>`;
