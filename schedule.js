@@ -13,6 +13,10 @@ const HEADER_ALIASES = {
   khuvuc: 'location', location: 'location', chinhanh: 'location', quocgia: 'location',
   bophan: 'department', department: 'department', phongban: 'department',
   brand: 'brand', thuonghieu: 'brand',
+  // Mã cá nhân lấy từ lương tháng trước, nhập chung file lịch cho gọn
+  macanhan: 'personal_key', makhoa: 'personal_key', khoacanhan: 'personal_key',
+  personalkey: 'personal_key', pin: 'personal_key',
+  thangluong: 'key_month', kyluong: 'key_month', thangapdung: 'key_month',
 };
 
 const OFF_TOKENS = new Set(['off', 'nghi', 'x', '-', 'nn', 'null']);
@@ -89,11 +93,30 @@ function parseScheduleFile(buffer, ym) {
     const row = grid[r];
     if (!row || row.every((c) => String(c).trim() === '')) continue;
 
-    const rec = { key: '', name: '', location: '', department: '', brand: '', days: {} };
+    const rec = { key: '', name: '', location: '', department: '', brand: '',
+                  personal_key: '', key_month: '', days: {} };
     Object.entries(colMap).forEach(([i, f]) => { rec[f] = String(row[i] ?? '').trim(); });
 
     const who = rec.name || rec.key || `dòng ${r + 1}`;
     if (!rec.key && !rec.name) { errors.push(`Dòng ${r + 1}: thiếu cả Mã lẫn Tên, đã bỏ qua.`); continue; }
+
+    // Excel hay cắt số 0 đầu, ví dụ 05260 thành 5260 — đệm lại cho đủ 5 chữ số
+    if (rec.personal_key) {
+      const raw = String(rec.personal_key).replace(/\D/g, '');
+      if (!raw) {
+        errors.push(`${who}: mã cá nhân không đọc được, đã bỏ qua cột này.`);
+        rec.personal_key = '';
+      } else if (raw.length > 5) {
+        errors.push(`${who}: mã cá nhân "${rec.personal_key}" dài quá 5 số, đã bỏ qua.`);
+        rec.personal_key = '';
+      } else {
+        rec.personal_key = raw.padStart(5, '0');
+      }
+    }
+    if (rec.key_month && !/^\d{4}-\d{2}$/.test(String(rec.key_month).trim())) {
+      const m = String(rec.key_month).match(/(\d{4})[-/](\d{1,2})/);
+      rec.key_month = m ? `${m[1]}-${String(m[2]).padStart(2, '0')}` : '';
+    }
 
     dayCols.forEach(({ index, day }) => {
       if (day > daysInMonth) return;   // tháng 30 ngày mà file có cột 31
