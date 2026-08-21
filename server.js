@@ -57,32 +57,6 @@ function requireUser(req, res, next) {
   next();
 }
 
-/* Chốt thiết bị: chạy trước mọi thao tác ghi của nhân viên.
-   Chưa gắn -> gắn thiết bị hiện tại. Đã gắn máy khác -> chặn. */
-function requireDevice(req, res, next) {
-  const u = req.user;
-  if (u.role === 'admin') return next();
-
-  if (!req.session.did) req.session.did = crypto.randomUUID();
-  const did = req.session.did;
-
-  if (!u.device_id) {
-    D.db.prepare('UPDATE users SET device_id=?, device_seen_at=?, device_ua=? WHERE id=?')
-      .run(did, Date.now(), (req.get('user-agent') || '').slice(0, 400), u.id);
-    D.audit(u, 'device_bind', null, req.ip);
-    return next();
-  }
-
-  if (u.device_id !== did) {
-    D.audit(u, 'device_mismatch', (req.get('user-agent') || '').slice(0, 200), req.ip);
-    return res.status(403).json({
-      ok: false, device_mismatch: true,
-      message: 'Link này đã gắn với thiết bị khác. Nếu bạn vừa đổi máy hoặc vừa cài app lên màn hình chính, nhờ quản lý bấm "Gỡ máy" giúp.',
-    });
-  }
-  next();
-}
-
 /* Bắt nhập mã cá nhân ở MỌI thao tác: lên ca, xuống ca, chấm công,
    bắt đầu và dừng rời vị trí. Mã lấy từ lương tháng trước nên không ai
    đưa cho đồng nghiệp, đó là lý do chọn nó. */
@@ -139,7 +113,6 @@ app.get('/k/:key', (req, res) => {
     return res.redirect('/?e=nokey');
   }
 
-  if (!req.session.did) req.session.did = crypto.randomUUID();
   req.session.uid = u.id;
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
@@ -201,10 +174,6 @@ app.get('/api/state', requireUser, (req, res) => {
     shift: D.shiftToday(req.user),
     offs: D.myOffs(req.user, ym),
     schedule: D.scheduleOf(req.user.id, ym),
-    device: {
-      bound: !!req.user.device_id,
-      is_this: req.user.device_id ? req.user.device_id === req.session.did : null,
-    },
     key: { required: D.hasPersonalKey(req.user), month: req.user.key_month || null },
     rollcall: (() => {
       const rc = D.activeRollCall(req.user.id);
@@ -215,12 +184,12 @@ app.get('/api/state', requireUser, (req, res) => {
   });
 });
 
-app.post('/api/start', requireUser, requireDevice, requireKey, (req, res) => {
+app.post('/api/start', requireUser, requireKey, (req, res) => {
   const r = D.startActivity(req.user, String((req.body || {}).code || ''), req.ip, req.get('user-agent'));
   res.status(r.ok ? 200 : 409).json({ ...r, state: D.stateFor(req.user) });
 });
 
-app.post('/api/stop', requireUser, requireDevice, requireKey, (req, res) => {
+app.post('/api/stop', requireUser, requireKey, (req, res) => {
   const r = D.stopActivity(req.user, 'staff');
   // Trong lúc rời vị trí có lượt điểm danh nào bị hoãn thì giờ bắn bù
   if (r.ok) {
@@ -377,18 +346,9 @@ app.get('/api/admin/rollcalls', requireUser, requireAdmin, (req, res) => {
 app.post('/api/admin/users/:id/rekey', requireUser, requireAdmin, (req, res) => {
   const u = targetUser(req, res); if (!u) return;
   const key = D.newKey();
-  D.db.prepare('UPDATE users SET key=?, device_id=NULL, device_seen_at=NULL, device_ua=NULL WHERE id=?')
-    .run(key, u.id);
+  D.db.prepare('UPDATE users SET key=? WHERE id=?').run(key, u.id);
   D.audit(req.user, 'rekey', u.name, req.ip);
   res.json({ ok: true, message: `Đã cấp key mới cho ${u.name}. Link cũ không dùng được nữa.`, users: D.allUsers(req.scope) });
-});
-
-/* Gỡ thiết bị mà giữ nguyên key — nhân viên đổi điện thoại thì dùng cái này */
-app.post('/api/admin/users/:id/unbind', requireUser, requireAdmin, (req, res) => {
-  const u = targetUser(req, res); if (!u) return;
-  D.db.prepare('UPDATE users SET device_id=NULL, device_seen_at=NULL, device_ua=NULL WHERE id=?').run(u.id);
-  D.audit(req.user, 'unbind', u.name, req.ip);
-  res.json({ ok: true, message: `Đã gỡ thiết bị của ${u.name}. Link cũ vẫn dùng được trên máy mới.`, users: D.allUsers(req.scope) });
 });
 
 app.delete('/api/admin/users/:id', requireUser, requireAdmin, (req, res) => {
@@ -403,7 +363,7 @@ app.delete('/api/admin/users/:id', requireUser, requireAdmin, (req, res) => {
 });
 
 /* --- Điểm danh ngẫu nhiên --- */
-app.post('/api/rollcall/answer', requireUser, requireDevice, (req, res) => {
+app.post('/api/rollcall/answer', requireUser, (req, res) => {
   const r = D.answerRollCall(req.user, (req.body || {}).key, req.ip);
   res.status(r.ok ? 200 : 400).json({ ...r, state: D.stateFor(req.user) });
 });
@@ -413,7 +373,7 @@ app.post('/api/rollcall/answer', requireUser, requireDevice, (req, res) => {
    ============================================================ */
 
 /* --- Nhân viên bấm Lên ca / Xuống ca / Chấm công --- */
-app.post('/api/punch', requireUser, requireDevice, requireKey, (req, res) => {
+app.post('/api/punch', requireUser, requireKey, (req, res) => {
   const r = D.punch(req.user, String((req.body || {}).kind || ''), req.ip, req.get('user-agent'));
   res.status(r.ok ? 200 : 400).json({ ...r, shift: D.shiftToday(req.user) });
 });
@@ -490,7 +450,7 @@ app.get('/api/offs', requireUser, (req, res) => {
   res.json(D.myOffs(req.user, String(req.query.ym || thisYm())));
 });
 
-app.post('/api/offs/toggle', requireUser, requireDevice, (req, res) => {
+app.post('/api/offs/toggle', requireUser, (req, res) => {
   const r = D.toggleOff(req.user, String((req.body || {}).day || ''));
   res.status(r.ok ? 200 : 400).json(r);
 });
