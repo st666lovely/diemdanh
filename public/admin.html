@@ -256,12 +256,7 @@ function renderUsers() {
       : '<span class="pill red">chưa đặt</span>'}
       <div style="margin-top:5px"><button class="btn btn-sm"
         onclick="setKey(${u.id},'${esc(u.name).replace(/'/g, "\\'")}')">${u.has_key ? 'Đổi mã' : 'Đặt mã'}</button></div></td>
-    <td>${u.bound
-      ? `<span class="pill pri"><span class="dot"></span>Đã gắn máy</span>
-         <div class="sub" style="margin-top:4px">${dmy(u.device_seen_at)}</div>`
-      : '<span class="pill">Chưa mở lần nào</span>'}</td>
     <td style="text-align:right;white-space:nowrap">
-      ${u.bound ? `<button class="btn btn-sm" onclick="post(${u.id},'unbind')">Gỡ máy</button>` : ''}
       <button class="btn btn-sm" onclick="post(${u.id},'rekey')">Cấp key mới</button>
       ${u.is_active
         ? `<button class="btn btn-red btn-sm" onclick="lockU(${u.id})">Khóa</button>`
@@ -290,8 +285,9 @@ function renderUsers() {
         Ô ghi <span class="mono">08:00-16:00</span>, để trống hoặc <span class="mono">OFF</span> là nghỉ.
         Giờ trong file là <b>giờ địa phương</b> của người đó — KhuVuc <span class="mono">VN</span> hay
         <span class="mono">ARM</span> quyết định múi giờ.
-        Cột <span class="mono">MaCaNhan</span> là 5 số lấy từ lương tháng trước; để trống thì giữ mã cũ.
-        Hệ thống băm ngay khi nhận, không lưu số gốc. Dùng chung được file của bot Telegram,
+        Cột <span class="mono">MaCaNhan</span> do quản lý tự đặt, 4–32 ký tự không khoảng trắng;
+        để trống thì giữ mã cũ. Hệ thống băm ngay khi nhận, không lưu bản gốc.
+        <b>Định dạng cột này thành Text trong Excel</b>, nếu không Excel sẽ cắt số 0 đầu. Dùng chung được file của bot Telegram,
         chỉ cần đổi cột TelegramID thành cột <span class="mono">Ma</span>.
       </div>
     </div>
@@ -317,18 +313,18 @@ Trần Minh Anh | CS | AE
 
     <div class="tw"><table>
       <thead><tr><th class="wide">Nhân viên</th><th>Link vào ca</th><th>Khu vực</th>
-        <th>Lịch tháng này</th><th>Mã cá nhân</th><th>Thiết bị</th>
+        <th>Lịch tháng này</th><th>Mã cá nhân</th>
         <th style="text-align:right">Xử lý</th></tr></thead>
-      <tbody>${trs || '<tr><td colspan="7" class="empty">Chưa có nhân viên nào.</td></tr>'}</tbody>
+      <tbody>${trs || '<tr><td colspan="6" class="empty">Chưa có nhân viên nào.</td></tr>'}</tbody>
     </table></div>
     <div class="sub" style="margin-top:10px">${staff.length} nhân viên · gửi link cho từng người một lần,
       họ lưu vào màn hình chính là xong</div>`;
 }
 
 async function setKey(id, name) {
-  const k = prompt(`Mã cá nhân cho ${name}\n\n5 chữ số lấy từ lương tháng trước:`
-    + `\nchữ số hàng trăm nghìn + 4 số cuối.`
-    + `\nVí dụ lương 42.560.000 -> nhập 52560`);
+  const k = prompt(`Mã cá nhân cho ${name}\n\n`
+    + `4–32 ký tự, không có khoảng trắng. Chữ, số, ký hiệu đều được.\n`
+    + `Ví dụ: x2560 · 52560 · HA-0825`);
   if (!k) return;
   const m = prompt('Tháng lương dùng làm mã (YYYY-MM):',
     new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 7));
@@ -424,10 +420,7 @@ async function bulk() {
 }
 
 async function post(id, what) {
-  const msg = what === 'rekey'
-    ? 'Cấp key mới? Link cũ sẽ không dùng được nữa.'
-    : 'Gỡ thiết bị đã gắn? Link cũ vẫn dùng được trên máy mới.';
-  if (!confirm(msg)) return;
+  if (!confirm('Cấp link mới? Link cũ sẽ không dùng được nữa.')) return;
   const r = await api(`/api/admin/users/${id}/${what}`, { method: 'POST' });
   toast(r.ok ? 'Xong' : 'Không thực hiện được', r.message || '', !!r.ok);
   load();
