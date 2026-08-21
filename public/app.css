@@ -1,368 +1,616 @@
-:root{
-  --bg:#F1F3F2;
-  --card:#FFFFFF;
-  --line:#E4E8E6;
-  --line2:#D3D9D6;
-  --ink:#101614;
-  --tx2:#5C6862;
-  --tx3:#8E9992;
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Trạm trực</title>
+<meta name="theme-color" content="#F1F3F2">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Trạm trực">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="manifest" href="/manifest.webmanifest" id="mf">
+<link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png">
+<link rel="apple-touch-icon" href="/icon-180.png">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
 
-  /* Một màu chủ đạo duy nhất — xanh lục sâu, dùng cho hành động chính và trạng thái sẵn sàng */
-  --pri:#0F6E52;
-  --pri-h:#0B5A43;
-  --pri-s:#E8F2EE;
+<div class="toast hide" id="toast"><span class="b"></span>
+  <div><div class="tt" id="tt"></div><div class="ts" id="ts"></div></div></div>
 
-  /* Hai màu cảnh báo, chỉ dùng cho trạng thái thời gian */
-  --amb:#A8650B;  --amb-s:#FDF3E4;  --amb-l:#F3DFBE;
-  --red:#BE3A2E;  --red-s:#FCEDEB;  --red-l:#F3CFCA;
+<div id="gate" class="gate" hidden></div>
+<div id="app" class="wrap" hidden></div>
 
-  --r:16px; --r-sm:10px;
-  --sh:0 1px 2px rgba(16,22,20,.05), 0 4px 14px rgba(16,22,20,.04);
+<script>
+/* Nếu đang mở qua /k/<key> thì trỏ manifest kèm key, để icon trên màn hình chính
+   mở đúng link của người này. Không làm vậy thì trên iPhone mở icon sẽ mất phiên. */
+(function () {
+  const m = location.pathname.match(/^\/k\/([A-Za-z0-9]+)/);
+  if (m) {
+    const el = document.getElementById('mf');
+    if (el) el.href = '/manifest.webmanifest?k=' + m[1].toUpperCase();
+  }
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
+  }
+})();
+
+const $ = s => document.querySelector(s);
+const pad = n => String(n).padStart(2, '0');
+const clk = s => (s < 0 ? '-' : '') + pad(Math.floor(Math.abs(s) / 60)) + ':' + pad(Math.abs(s) % 60);
+let TZ = null;   // múi giờ khu vực của nhân viên, server gửi xuống
+const fmtTz = (t, o) => new Intl.DateTimeFormat('en-GB',
+  { timeZone: TZ || undefined, hour12: false, ...o }).format(new Date(t));
+const hhmm = t => TZ ? fmtTz(t, { hour: '2-digit', minute: '2-digit' })
+                     : pad(new Date(t).getHours()) + ':' + pad(new Date(t).getMinutes());
+const DOW = ['Chủ Nhật','Thứ Hai','Thứ Ba','Thứ Tư','Thứ Năm','Thứ Sáu','Thứ Bảy'];
+const DOW_S = ['CN','T2','T3','T4','T5','T6','T7'];
+
+let S = null, skew = 0, busy = false, offYm = null;
+
+/* ============================================================
+   BÁO ĐỘNG — chuông, rung, thông báo hệ thống, nháy màn hình
+
+   Không ép được máy kêu khi loa đã tắt ở tầng hệ điều hành: trang web
+   không có quyền chỉnh âm lượng. Nên đánh cùng lúc nhiều kênh, tắt tiếng
+   thì vẫn còn rung, thông báo và màn hình nháy.
+   ============================================================ */
+const Alarm = {
+  ctx: null, loop: null, blink: null, kind: null, unlocked: false,
+  wakeLock: null, _noti: null, _title: null,
+
+  /* Trình duyệt chặn phát tiếng nếu chưa có thao tác người dùng.
+     Mở khoá ở lần chạm đầu tiên để các lần sau kêu được. */
+  async unlock() {
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return false;
+      if (!this.ctx) this.ctx = new AC();
+      if (this.ctx.state === 'suspended') await this.ctx.resume();
+      const b = this.ctx.createBuffer(1, 1, 22050);      // đoạn câm cho iOS ghi nhận
+      const src = this.ctx.createBufferSource();
+      src.buffer = b; src.connect(this.ctx.destination); src.start(0);
+      this.unlocked = true;
+      if ('Notification' in window && Notification.permission === 'default') {
+        Notification.requestPermission().catch(function () {});
+      }
+      this.keepAwake();
+      return true;
+    } catch (e) { return false; }
+  },
+
+  /* Giữ màn hình không tắt — tắt màn thì không thấy thẻ điểm danh */
+  async keepAwake() {
+    try {
+      if ('wakeLock' in navigator && !this.wakeLock) {
+        this.wakeLock = await navigator.wakeLock.request('screen');
+        this.wakeLock.addEventListener('release', () => { this.wakeLock = null; });
+      }
+    } catch (e) {}
+  },
+
+  /* Tự dựng tiếng bíp, không cần file âm thanh */
+  tone(freq, at, dur, gain) {
+    if (!this.ctx) return;
+    const t0 = this.ctx.currentTime + at;
+    const o = this.ctx.createOscillator();
+    const g = this.ctx.createGain();
+    o.type = 'square';
+    o.frequency.setValueAtTime(freq, t0);
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.exponentialRampToValueAtTime(gain, t0 + 0.01);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    o.connect(g); g.connect(this.ctx.destination);
+    o.start(t0); o.stop(t0 + dur + 0.02);
+  },
+
+  ring(kind) {
+    if (!this.ctx) return;
+    if (this.ctx.state === 'suspended') this.ctx.resume().catch(function () {});
+    if (kind === 'overtime') {
+      this.tone(440, 0, 0.18, 0.35);
+      this.tone(330, 0.22, 0.28, 0.35);
+    } else {
+      this.tone(880, 0, 0.12, 0.4);
+      this.tone(1100, 0.16, 0.12, 0.4);
+      this.tone(880, 0.32, 0.2, 0.4);
+    }
+  },
+
+  buzz(kind) {
+    try {
+      if (navigator.vibrate) {
+        navigator.vibrate(kind === 'overtime' ? [300, 120, 300] : [200, 100, 200, 100, 400]);
+      }
+    } catch (e) {}
+  },
+
+  /* Thông báo hệ thống dùng chuông riêng của máy, kêu cả khi tab bị ẩn.
+     iPhone chỉ chạy khi đã cài app ra màn hình chính. */
+  notify(kind) {
+    try {
+      if (!('Notification' in window) || Notification.permission !== 'granted') return;
+      if (this._noti) { this._noti.close(); this._noti = null; }
+      this._noti = new Notification(
+        kind === 'overtime' ? 'Đã quá giờ rời vị trí' : 'Đến lượt điểm danh',
+        { body: kind === 'overtime'
+            ? 'Bấm Dừng lại ngay để không bị ghi quá giờ.'
+            : 'Xác nhận có mặt bằng mã cá nhân, quá giờ là tính vắng.',
+          icon: '/icon-192.png', badge: '/icon-192.png',
+          tag: 'tram-truc', renotify: true, requireInteraction: true });
+      this._noti.onclick = () => { window.focus(); if (this._noti) this._noti.close(); };
+    } catch (e) {}
+  },
+
+  start(kind) {
+    if (this.kind === kind) return;
+    this.stop();
+    this.kind = kind;
+    document.body.classList.add('alarming');
+
+    const beat = () => { this.ring(kind); this.buzz(kind); };
+    beat();
+    this.notify(kind);
+    this.loop = setInterval(beat, kind === 'overtime' ? 4000 : 2500);
+
+    if (!this._title) this._title = document.title;
+    let on = false;
+    this.blink = setInterval(() => {
+      on = !on;
+      document.title = on ? (kind === 'overtime' ? '⚠ QUÁ GIỜ' : '● ĐIỂM DANH') : this._title;
+    }, 700);
+  },
+
+  stop() {
+    clearInterval(this.loop); clearInterval(this.blink);
+    this.loop = null; this.blink = null; this.kind = null;
+    document.body.classList.remove('alarming');
+    if (this._title) document.title = this._title;
+    if (this._noti) { try { this._noti.close(); } catch (e) {} this._noti = null; }
+    try { if (navigator.vibrate) navigator.vibrate(0); } catch (e) {}
+  },
+};
+
+['pointerdown', 'keydown', 'touchstart'].forEach(function (ev) {
+  window.addEventListener(ev, function () { Alarm.unlock(); }, { once: true, passive: true });
+});
+document.addEventListener('visibilitychange', function () {
+  if (!document.hidden) Alarm.keepAwake();
+});
+const nowMs = () => Date.now() + skew;
+const leftOf = i => Math.round((i.started_at + i.limit_minutes * 60000 - nowMs()) / 1000);
+const pctOf  = i => Math.min(100, ((nowMs() - i.started_at) / (i.limit_minutes * 60000)) * 100);
+
+function toast(t, s, ok) {
+  const el = $('#toast');
+  el.classList.toggle('err', !ok); el.classList.remove('hide');
+  $('#tt').textContent = t; $('#ts').textContent = s || '';
+  clearTimeout(toast._t); toast._t = setTimeout(() => el.classList.add('hide'), 4200);
 }
-*{box-sizing:border-box;margin:0;padding:0}
-/* Thuộc tính hidden của HTML phải thắng mọi quy tắc display của CSS.
-   Thiếu dòng này thì .gate{display:flex} đè lên [hidden], khiến khung
-   đăng nhập vẫn hiện sau khi đã đăng nhập xong và che mất nội dung bên dưới. */
-[hidden]{display:none!important}
-html{-webkit-text-size-adjust:100%}
-body{
-  background:var(--bg);color:var(--ink);
-  font-family:'Be Vietnam Pro',system-ui,-apple-system,sans-serif;
-  font-size:15px;line-height:1.45;-webkit-font-smoothing:antialiased;
-  font-variant-numeric:tabular-nums;
-  min-height:100vh;
-}
-button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
-a{color:inherit;text-decoration:none}
-input,select,textarea{
-  font-family:inherit;font-size:15px;color:var(--ink);background:#fff;
-  border:1.5px solid var(--line2);border-radius:var(--r-sm);padding:12px 13px;width:100%;
-  transition:border-color .15s,box-shadow .15s;
-}
-input:focus,select:focus,textarea:focus{outline:none;border-color:var(--pri);box-shadow:0 0 0 3px var(--pri-s)}
-button:focus-visible,a:focus-visible{outline:2px solid var(--pri);outline-offset:2px}
-.num{font-variant-numeric:tabular-nums}
 
-/* ===== Nút ===== */
-.btn{
-  display:inline-flex;align-items:center;justify-content:center;gap:8px;
-  padding:13px 20px;border-radius:var(--r-sm);font-weight:600;font-size:15px;
-  background:#fff;border:1.5px solid var(--line2);color:var(--ink);
-  transition:background .15s,border-color .15s;min-height:46px;
-}
-.btn:hover{background:#F7F9F8;border-color:var(--line2)}
-.btn:active{transform:scale(.99)}
-.btn:disabled{opacity:.45;cursor:not-allowed}
-.btn-pri{background:var(--pri);border-color:var(--pri);color:#fff}
-.btn-pri:hover{background:var(--pri-h);border-color:var(--pri-h)}
-.btn-dark{background:var(--ink);border-color:var(--ink);color:#fff}
-.btn-dark:hover{background:#000}
-.btn-red{background:var(--red-s);border-color:var(--red-l);color:var(--red)}
-.btn-red:hover{background:#F8DEDA}
-.btn-sm{padding:7px 12px;font-size:13.5px;min-height:36px;border-radius:8px}
-.btn-block{width:100%}
-
-/* ===== Thẻ ===== */
-.card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--sh)}
-.card+.card{margin-top:12px}
-.card-p{padding:18px}
-.card-h{
-  display:flex;align-items:center;gap:10px;padding:15px 18px;border-bottom:1px solid var(--line);
-}
-.card-h .t{font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--tx3)}
-.card-h .r{margin-left:auto;font-size:13px;color:var(--tx3);font-weight:500}
-
-/* ===== Nhãn ===== */
-.pill{
-  display:inline-flex;align-items:center;gap:5px;padding:4px 11px;border-radius:999px;
-  font-size:12.5px;font-weight:700;letter-spacing:.02em;
-  background:#F0F2F1;color:var(--tx2);border:1px solid var(--line);
-}
-.pill.pri{background:var(--pri-s);color:var(--pri);border-color:#CFE5DD}
-.pill.amb{background:var(--amb-s);color:var(--amb);border-color:var(--amb-l)}
-.pill.red{background:var(--red-s);color:var(--red);border-color:var(--red-l)}
-.dot{width:7px;height:7px;border-radius:50%;background:currentColor;flex:none}
-
-/* ===== TRANG NHÂN VIÊN — một cột, canh giữa, chạy tốt cả điện thoại lẫn máy tính ===== */
-.wrap{max-width:520px;margin:0 auto;padding:16px 16px 48px}
-.bar{display:flex;align-items:center;gap:10px;padding:6px 2px 14px}
-.bar .nm{font-weight:700;font-size:16px;letter-spacing:-.01em}
-.bar .sp{flex:1}
-
-/* Thẻ chính: đồng hồ. Khi đang rời vị trí thì chính nó thành đếm ngược. */
-.hero{padding:26px 20px 22px;text-align:center}
-.hero .lb{font-size:12px;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:var(--tx3)}
-.hero .big{
-  font-size:clamp(52px,15vw,68px);font-weight:700;letter-spacing:-.035em;line-height:1;
-  margin-top:10px;font-variant-numeric:tabular-nums;
-}
-.hero .big .s{color:var(--line2);font-weight:600}
-.hero .sub{font-size:14px;color:var(--tx2);margin-top:10px}
-.hero .tags{display:flex;justify-content:center;gap:7px;margin-top:14px}
-
-.hero.run{background:var(--amb-s);border-color:var(--amb-l)}
-.hero.run .lb{color:var(--amb)}
-.hero.run .big{color:var(--amb)}
-.hero.over{background:var(--red-s);border-color:var(--red-l)}
-.hero.over .lb,.hero.over .big{color:var(--red)}
-
-.bar-track{height:4px;background:rgba(16,22,20,.08);border-radius:4px;margin-top:18px;overflow:hidden}
-.bar-track i{display:block;height:100%;width:0;background:var(--amb);border-radius:4px;transition:width 1s linear}
-.hero.over .bar-track i{background:var(--red)}
-
-/* Trạng thái bộ phận */
-.dep{display:flex;align-items:center;gap:12px;padding:16px 18px}
-.dep .ic{
-  width:40px;height:40px;border-radius:12px;flex:none;display:flex;align-items:center;justify-content:center;
-  background:var(--pri-s);color:var(--pri);font-weight:800;font-size:15px;
-}
-.dep.busy .ic{background:var(--amb-s);color:var(--amb)}
-.dep.over .ic{background:var(--red-s);color:var(--red)}
-.dep .m{flex:1;min-width:0}
-.dep .m .a{font-weight:600;font-size:15px}
-.dep .m .b{font-size:13px;color:var(--tx3);margin-top:1px}
-.dep .cd{font-size:19px;font-weight:700;color:var(--amb);letter-spacing:-.02em}
-.dep.over .cd{color:var(--red)}
-
-/* Nút hoạt động */
-.acts{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:14px}
-.act{
-  text-align:left;padding:15px 14px;border-radius:12px;border:1.5px solid var(--line);
-  background:#fff;transition:background .15s,border-color .15s;min-height:76px;
-}
-.act:hover:not(:disabled){background:#F7F9F8;border-color:var(--line2)}
-.act:active:not(:disabled){transform:scale(.985)}
-.act:disabled{opacity:.4;cursor:not-allowed}
-.act .n{font-weight:700;font-size:15.5px;letter-spacing:-.01em}
-.act .d{font-size:12.5px;color:var(--tx3);margin-top:4px}
-
-.blocked{
-  margin:0 14px 14px;padding:13px 15px;border-radius:12px;
-  background:var(--red-s);border:1px solid var(--red-l);color:#8E2A21;font-size:14px;line-height:1.5;
+/* ---------- Màn chặn ---------- */
+const GATES = {
+  nokey:  { ic: '⊘', h: 'Link không hợp lệ',
+    p: 'Link này không tồn tại hoặc đã bị thu hồi. Liên hệ quản lý để nhận link mới.' },
+  device: { ic: '⊗', h: 'Link đã gắn với thiết bị khác',
+    p: 'Mỗi link chỉ dùng được trên một thiết bị. Nếu bạn vừa đổi máy, nhờ quản lý gỡ thiết bị cũ giúp.' },
+  none:   { ic: '→', h: 'Cần link riêng để vào',
+    p: 'Mở link quản lý đã gửi cho bạn. Lưu vào màn hình chính để lần sau vào thẳng, không phải nhập gì.' },
+};
+function showGate(kind) {
+  const g = GATES[kind] || GATES.none;
+  $('#app').hidden = true; $('#gate').hidden = false;
+  $('#gate').innerHTML = `<div class="card">
+    <div class="ic">${g.ic}</div><h1>${g.h}</h1><p>${g.p}</p>
+    <p style="margin-top:22px;font-size:13px;color:var(--tx3)">Bạn là quản lý?
+      <a href="/admin" style="color:var(--pri);font-weight:600">Đăng nhập tại đây</a></p></div>`;
 }
 
-/* Tóm tắt hôm nay */
-/* ===== Nhắc cài app ===== */
-.install{display:flex;align-items:flex-start;gap:12px;padding:14px 14px 14px 16px;
-  background:var(--pri-s);border-color:#CFE5DD;margin-bottom:12px}
-.install .ic{width:34px;height:34px;border-radius:10px;flex:none;display:flex;align-items:center;
-  justify-content:center;background:#fff;color:var(--pri);font-size:17px;font-weight:700}
-.install .m{flex:1;min-width:0}
-.install .m .a{font-weight:700;font-size:14.5px;color:var(--pri)}
-.install .m .b{font-size:13px;color:#2C5F4E;margin-top:3px;line-height:1.5}
-.install .x{flex:none;width:28px;height:28px;border-radius:8px;color:var(--pri);
-  font-size:18px;line-height:1;opacity:.55}
-.install .x:hover{opacity:1;background:rgba(15,110,82,.09)}
-
-/* ===== Báo động: viền đỏ nháy quanh màn hình ===== */
-body.alarming::after{
-  content:'';position:fixed;inset:0;pointer-events:none;z-index:300;
-  box-shadow:inset 0 0 0 6px var(--red);
-  animation:alarmflash 1s steps(1) infinite;
-}
-@keyframes alarmflash{0%,49%{opacity:1}50%,100%{opacity:0}}
-@media(prefers-reduced-motion:reduce){
-  body.alarming::after{animation:none;opacity:.85}
+/* ---------- API ---------- */
+/* Hỏi mã cá nhân trước mỗi thao tác. Mã lấy từ lương tháng trước nên
+   không ai đưa cho đồng nghiệp — đó là lý do dùng nó thay vì PIN thường. */
+function askKey(việc) {
+  if (!S || !S.key || !S.key.required) return '';
+  const k = prompt(`Nhập mã cá nhân để ${việc}\n(5 chữ số lấy từ lương tháng trước)`);
+  return k === null ? null : String(k).trim();
 }
 
-/* ===== Thẻ bật âm báo ===== */
-.snd{display:flex;align-items:flex-start;gap:12px;padding:14px 14px 14px 16px;
-  background:var(--amb-s);border-color:var(--amb-l);margin-bottom:12px}
-.snd .ic{width:34px;height:34px;border-radius:10px;flex:none;display:flex;align-items:center;
-  justify-content:center;background:#fff;font-size:17px}
-.snd .m{flex:1;min-width:0}
-.snd .m .a{font-weight:700;font-size:14.5px;color:var(--amb)}
-.snd .m .b{font-size:13px;color:#7A4A08;margin-top:3px;line-height:1.5}
-.snd .btn{flex:none}
-
-/* ===== Thẻ điểm danh ===== */
-.rc{display:flex;align-items:center;gap:14px;padding:16px 18px;margin-bottom:12px;
-  background:var(--red-s);border-color:var(--red-l)}
-.rc .m{flex:1;min-width:0}
-.rc .m .a{font-weight:700;font-size:15.5px;color:var(--red)}
-.rc .m .b{font-size:13px;color:#8E2A21;margin-top:3px;line-height:1.5}
-.rc .cd{font-size:22px;font-weight:700;color:var(--red);flex:none}
-.rc .btn{flex:none}
-@media(max-width:520px){
-  .rc{flex-wrap:wrap}
-  .rc .m{flex-basis:100%}
-  .rc .btn{flex:1}
+async function api(url, body, method) {
+  const r = await fetch(url, {
+    method: method || 'POST', headers: { 'Content-Type': 'application/json' },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  return { status: r.status, ...(await r.json().catch(() => ({}))) };
 }
 
-/* ===== Chấm công ca: Lên ca / Xuống ca / Chấm công ===== */
-.punch{display:grid;grid-template-columns:repeat(3,1fr);gap:9px;padding:12px 14px 14px}
-.pbtn{padding:14px 8px;border-radius:12px;border:1.5px solid var(--line);background:#fff;
-  font-weight:700;font-size:14.5px;transition:background .15s,border-color .15s;min-height:72px;
-  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px}
-.pbtn .k{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--tx3);font-weight:700}
-.pbtn:hover{background:#F7F9F8;border-color:var(--line2)}
-.pbtn:active{transform:scale(.985)}
-/* Nút nên bấm tiếp theo được tô đậm — chưa lên ca thì "Lên ca", đang trong ca thì "Xuống ca" */
-.pbtn.go{background:var(--pri);border-color:var(--pri);color:#fff}
-.pbtn.go .k{color:rgba(255,255,255,.72)}
-.pbtn.go:hover{background:var(--pri-h)}
-
-/* ===== Lịch off ===== */
-.offnav{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:14px 18px 8px}
-.offnav b{font-size:15px;font-weight:700}
-.odow{display:grid;grid-template-columns:repeat(7,1fr);gap:5px;padding:0 14px}
-.odow span{text-align:center;font-size:11px;font-weight:700;color:var(--tx3)}
-.ogrid{display:grid;grid-template-columns:repeat(7,1fr);gap:5px;padding:6px 14px 0}
-.od{aspect-ratio:1;border-radius:10px;border:1.5px solid transparent;background:#F4F6F5;
-  color:var(--ink);font-size:14px;font-weight:600;transition:background .15s;min-height:38px}
-.od:hover:not(:disabled){background:#E9EDEB}
-.od.blank{visibility:hidden}
-.od.on{background:var(--pri);color:#fff;border-color:var(--pri)}
-/* Hạn mức có thể lên tới 15 ngày nên ô đã chọn cần nổi rõ khi nhìn lướt */
-.od.on{box-shadow:inset 0 0 0 1px rgba(255,255,255,.25)}
-.od.today{border-color:var(--amb)}
-/* Xin nghỉ nhưng lịch vẫn xếp ca — gạch ngang số để thấy ngay là không được duyệt */
-.od.on.rejected{background:var(--red);border-color:var(--red);text-decoration:line-through;opacity:.9}
-/* Lịch cho nghỉ mà mình không đăng ký */
-.od.rosteroff{background:var(--pri-s);color:var(--pri);border-color:#CFE5DD}
-.offlegend .sw.rejected{background:var(--red);border-color:var(--red)}
-.offlegend .sw.rosteroff{background:var(--pri-s);border-color:#CFE5DD}
-.offnote{padding:12px 18px 0;font-size:13px;color:var(--tx2);line-height:1.55}
-.od:disabled{opacity:.4;cursor:not-allowed}
-/* Ngày đã có người cùng bộ phận nhận — gạch chéo nhẹ để phân biệt với ngày hết hạn mức */
-.od.busy{background:repeating-linear-gradient(45deg,#F4F6F5,#F4F6F5 4px,#E7EBE9 4px,#E7EBE9 8px);
-  color:var(--tx3);opacity:.85}
-.offlegend{display:flex;flex-wrap:wrap;gap:14px;padding:12px 16px 0;font-size:12px;color:var(--tx3)}
-.offlegend span{display:inline-flex;align-items:center;gap:6px}
-.offlegend .sw{width:13px;height:13px;border-radius:4px;background:#F4F6F5;border:1px solid var(--line2)}
-.offlegend .sw.on{background:var(--pri);border-color:var(--pri)}
-.offlegend .sw.busy{background:repeating-linear-gradient(45deg,#F4F6F5,#F4F6F5 3px,#E7EBE9 3px,#E7EBE9 6px)}
-
-.sum{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--line)}
-.sum div{background:#fff;padding:15px 12px;text-align:center}
-.sum .n{font-size:22px;font-weight:700;letter-spacing:-.02em}
-.sum .l{font-size:12px;color:var(--tx3);margin-top:2px;font-weight:500}
-.sum .n.red{color:var(--red)}
-
-.log{padding:6px 18px 14px}
-.log .r{display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--line);font-size:14px}
-.log .r:last-child{border-bottom:none}
-.log .r .t{color:var(--tx3);font-size:13px;min-width:44px}
-.log .r .n{flex:1}
-.log .r .d{font-weight:600;font-size:13.5px}
-.log .r .d.red{color:var(--red)}
-
-.hint{font-size:12.5px;color:var(--tx3);line-height:1.55;padding:0 4px;margin-top:14px;text-align:center}
-
-/* ===== Màn chờ / lỗi key ===== */
-.gate{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px}
-.gate .card{width:min(400px,100%);text-align:center;padding:32px 26px}
-.gate h1{font-size:21px;font-weight:700;letter-spacing:-.02em;margin-bottom:8px}
-.gate p{color:var(--tx2);font-size:14.5px;line-height:1.6}
-.gate .ic{
-  width:52px;height:52px;border-radius:16px;margin:0 auto 18px;display:flex;align-items:center;
-  justify-content:center;font-size:24px;background:var(--red-s);color:var(--red);
+async function load() {
+  const r = await fetch('/api/state');
+  if (r.status === 401) { showGate(new URLSearchParams(location.search).get('e') || 'none'); return; }
+  const d = await r.json();
+  skew = d.server_time - Date.now();
+  S = d;
+  TZ = d.shift && d.shift.timezone ? d.shift.timezone : null;
+  if (!offYm) offYm = d.offs.ym;
+  $('#gate').hidden = true; $('#app').hidden = false;
+  render();
 }
-.gate form{margin-top:20px;display:flex;flex-direction:column;gap:11px;text-align:left}
-.gate label{font-size:12.5px;font-weight:600;color:var(--tx2);display:flex;flex-direction:column;gap:6px}
-.gate .err{color:var(--red);font-size:13.5px;min-height:18px}
 
-/* ===== QUẢN TRỊ ===== */
-.adm{max-width:1280px;margin:0 auto;padding:20px 20px 60px}
-.top{display:flex;align-items:center;gap:12px;padding:14px 20px;background:#fff;border-bottom:1px solid var(--line)}
-.top .lg{font-weight:800;font-size:15px;letter-spacing:-.02em}
-.top .sp{flex:1}
-.top .mini{font-size:13.5px;color:var(--tx2);font-weight:600}
-.top .mini:hover{color:var(--ink)}
-
-.head{display:flex;align-items:flex-end;gap:14px;margin-bottom:18px;flex-wrap:wrap}
-.head h1{font-size:24px;font-weight:800;letter-spacing:-.03em}
-.head p{color:var(--tx3);font-size:13.5px;margin-top:2px}
-.head .sp{margin-left:auto;display:flex;gap:8px}
-
-.tabs{display:inline-flex;gap:3px;padding:3px;background:#E7EAE9;border-radius:11px;margin-bottom:18px}
-.tabs button{padding:8px 16px;border-radius:8px;font-size:14px;font-weight:600;color:var(--tx2)}
-.tabs button.on{background:#fff;color:var(--ink);box-shadow:0 1px 3px rgba(16,22,20,.09)}
-
-.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:18px}
-.kpi{background:#fff;border:1px solid var(--line);border-radius:var(--r);padding:16px 18px;box-shadow:var(--sh)}
-.kpi .n{font-size:26px;font-weight:700;letter-spacing:-.03em}
-.kpi .l{font-size:12.5px;color:var(--tx3);margin-top:2px;font-weight:500}
-.kpi.amb .n{color:var(--amb)}.kpi.red .n{color:var(--red)}.kpi.pri .n{color:var(--pri)}
-
-.lanes{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:10px;margin-bottom:18px}
-.lane{background:#fff;border:1px solid var(--line);border-radius:var(--r);padding:14px 16px;
-  display:flex;align-items:center;gap:12px;box-shadow:var(--sh);position:relative;overflow:hidden}
-.lane .ic{width:38px;height:38px;border-radius:11px;flex:none;display:flex;align-items:center;
-  justify-content:center;font-weight:800;font-size:13px;background:var(--pri-s);color:var(--pri)}
-.lane.busy{border-color:var(--amb-l)}
-.lane.busy .ic{background:var(--amb-s);color:var(--amb)}
-.lane.over{border-color:var(--red-l)}
-.lane.over .ic{background:var(--red-s);color:var(--red)}
-.lane .m{flex:1;min-width:0}
-.lane .m .a{font-weight:600;font-size:14.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.lane .m .b{font-size:12.5px;color:var(--tx3);margin-top:1px}
-.lane .cd{font-size:17px;font-weight:700;color:var(--amb)}
-.lane.over .cd{color:var(--red)}
-.lane .fill{position:absolute;left:0;bottom:0;height:3px;width:0;background:var(--amb);transition:width 1s linear}
-.lane.over .fill{background:var(--red)}
-
-.fil{display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;margin-bottom:16px}
-.fil .f{display:flex;flex-direction:column;gap:6px;min-width:132px}
-.fil label{font-size:11.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--tx3)}
-.fil input,.fil select{padding:10px 11px;font-size:14px}
-
-.tw{background:#fff;border:1px solid var(--line);border-radius:var(--r);overflow:auto;box-shadow:var(--sh)}
-table{width:100%;border-collapse:collapse;font-size:14px}
-thead th{text-align:left;padding:12px 14px;font-size:11.5px;font-weight:700;letter-spacing:.06em;
-  text-transform:uppercase;color:var(--tx3);border-bottom:1px solid var(--line);white-space:nowrap;
-  background:#FAFBFB;position:sticky;top:0}
-tbody td{padding:13px 14px;border-bottom:1px solid #EFF2F1;white-space:nowrap;vertical-align:middle}
-tbody tr:last-child td{border-bottom:none}
-tbody tr:hover{background:#FAFBFB}
-td.wide,th.wide{width:100%;white-space:normal}
-.sub{color:var(--tx3);font-size:12.5px}
-.empty{padding:44px;text-align:center;color:var(--tx3)}
-.keybox{display:inline-flex;align-items:center;gap:7px}
-.keybox code{font-family:ui-monospace,Menlo,monospace;font-size:13px;background:#F2F4F3;
-  border:1px solid var(--line);border-radius:6px;padding:3px 8px;letter-spacing:.06em}
-
-.row{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end}
-.row .f{display:flex;flex-direction:column;gap:6px;flex:1;min-width:150px}
-.row .f label{font-size:11.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--tx3)}
-
-/* Thanh so sánh tổng phút trễ giữa các nhân viên — nhìn lướt thấy ai nổi bật */
-.lbar{height:4px;background:#EDF0EE;border-radius:4px;margin:5px 0 3px;overflow:hidden}
-.lbar i{display:block;height:100%;background:var(--red);border-radius:4px}
-
-/* ===== Chip lọc lịch off ===== */
-.chips{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:16px}
-.chip{padding:8px 14px;border-radius:999px;font-size:13.5px;font-weight:600;color:var(--tx2);
-  background:#fff;border:1.5px solid var(--line);transition:background .15s,border-color .15s}
-.chip b{font-weight:800;margin-left:3px}
-.chip:hover{background:#F7F9F8;border-color:var(--line2)}
-.chip.on{background:var(--pri);border-color:var(--pri);color:#fff}
-
-/* Nhãn ngày nghỉ, bấm để bỏ */
-.daytag{display:inline-flex;align-items:center;gap:5px;padding:4px 8px 4px 11px;margin:2px 4px 2px 0;
-  border-radius:8px;background:var(--pri-s);border:1px solid #CFE5DD;color:var(--pri);
-  font-size:13px;font-weight:700;transition:background .15s}
-.daytag span{opacity:.5;font-weight:400}
-.daytag:hover{background:#DCEBE5}
-.daytag:hover span{opacity:1;color:var(--red)}
-/* Ngày xin nghỉ nhưng lịch vẫn xếp ca */
-.daytag.bad{background:var(--red-s);border-color:var(--red-l);color:var(--red);text-decoration:line-through}
-.daytag.bad:hover{background:#F8DEDA}
-
-/* ===== Toast ===== */
-.toast{position:fixed;left:50%;bottom:20px;transform:translateX(-50%);z-index:200;
-  display:flex;align-items:flex-start;gap:12px;width:min(440px,calc(100vw - 28px));
-  padding:14px 16px;border-radius:14px;background:#fff;border:1px solid var(--line);
-  box-shadow:0 8px 30px rgba(16,22,20,.16)}
-.toast.hide{display:none}
-.toast .b{width:4px;align-self:stretch;border-radius:4px;background:var(--pri);flex:none}
-.toast.err .b{background:var(--red)}
-.toast .tt{font-weight:700;font-size:14.5px}
-.toast .ts{font-size:13.5px;color:var(--tx2);margin-top:2px;line-height:1.45}
-
-@media(max-width:560px){
-  .adm{padding:14px 12px 50px}
-  .kpis{grid-template-columns:repeat(2,1fr)}
-  .lanes{grid-template-columns:1fr}
+async function act(url, body) {
+  if (busy) return;
+  const việc = url.includes('/stop') ? 'dừng hoạt động' : 'bắt đầu hoạt động';
+  const k = askKey(việc);
+  if (k === null) return;
+  busy = true;
+  const r = await api(url, { ...(body || {}), key: k });
+  busy = false;
+  if (r.ok && url.includes('/stop')) Alarm.stop();
+  if (r.state) { S = r.state; skew = S.server_time - Date.now(); }
+  toast(r.ok ? 'Đã ghi nhận' : 'Chưa thực hiện được', r.message || '', !!r.ok);
+  await load();
 }
-@media(prefers-reduced-motion:reduce){*{transition:none!important}}
+
+async function punch(kind) {
+  if (busy) return;
+  const tên = { in: 'lên ca', out: 'xuống ca', log: 'chấm công' }[kind] || 'chấm công';
+  const k = askKey(tên);
+  if (k === null) return;
+  busy = true;
+  const r = await api('/api/punch', { kind, key: k });
+  busy = false;
+  if (r.device_mismatch) { toast('Sai thiết bị', r.message, false); return; }
+  if (r.key_required) { toast('Mã cá nhân', r.message, false); return; }
+  toast(r.ok ? (r.late_level ? 'Đã ghi nhận — có trễ' : 'Đã ghi nhận') : 'Chưa thực hiện được',
+        r.message || '', r.ok && !r.late_level);
+  await load();
+}
+
+async function toggleOff(day) {
+  if (busy) return; busy = true;
+  const r = await api('/api/offs/toggle', { day });
+  busy = false;
+  toast(r.ok ? 'Đã cập nhật' : 'Chưa cập nhật được', r.message || '', !!r.ok);
+  if (r.ok) { const s = await fetch('/api/offs?ym=' + offYm); S.offs = await s.json(); render(); }
+}
+
+async function moveMonth(delta) {
+  const [y, m] = offYm.split('-').map(Number);
+  const d = new Date(y, m - 1 + delta, 1);
+  offYm = `${d.getFullYear()}-${pad(d.getMonth() + 1)}`;
+  const s = await fetch('/api/offs?ym=' + offYm);
+  S.offs = await s.json();
+  render();
+}
+
+/* ---------- Vẽ ---------- */
+function clockParts() {
+  const t = nowMs();
+  if (!TZ) { const d = new Date(t); return [pad(d.getHours()), pad(d.getMinutes()), pad(d.getSeconds())]; }
+  return fmtTz(t, { hour: '2-digit', minute: '2-digit', second: '2-digit' }).split(':');
+}
+function dateLine() {
+  const t = nowMs();
+  if (!TZ) { const d = new Date(t);
+    return `${DOW[d.getDay()]}, ${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()}`; }
+  const p = new Intl.DateTimeFormat('en-GB', { timeZone: TZ, weekday: 'short',
+    day: '2-digit', month: '2-digit', year: 'numeric' }).formatToParts(new Date(t));
+  const g = k => (p.find(x => x.type === k) || {}).value;
+  const wd = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 }[g('weekday')] ?? 0;
+  return `${DOW[wd]}, ${g('day')}/${g('month')}/${g('year')}`;
+}
+
+function heroCard(d, mine, left, over) {
+  return `<div class="card hero ${mine ? 'run' : ''} ${over ? 'over' : ''}" id="hero">
+    <div class="lb">${mine ? mine.type_name : 'Thời gian hiện tại'}</div>
+    <div class="big" id="big">${mine ? clk(left)
+      : (() => { const c = clockParts();
+          return `${c[0]}<span class="s">:</span>${c[1]}<span class="s">:</span>${c[2]}`; })()}</div>
+    <div class="sub" id="heroSub">${mine
+      ? `Bắt đầu ${hhmm(mine.started_at)} · cho phép ${mine.limit_minutes} phút`
+      : dateLine()}</div>
+    ${mine ? `<div class="bar-track"><i id="trk" style="width:${pctOf(mine)}%"></i></div>` : `
+      <div class="tags"><span class="pill">${S.me.department || '—'}</span>
+        ${S.me.brand ? `<span class="pill pri">${S.me.brand}</span>` : ''}
+        ${S.shift && S.shift.location ? `<span class="pill">${S.shift.location}</span>` : ''}</div>`}
+  </div>`;
+}
+
+/* Ca hôm nay: 3 nút chấm công + lịch sử bấm trong ngày */
+function shiftCard() {
+  const sh = S.shift;
+  const state = sh.on_shift
+    ? `<span class="pill pri"><span class="dot"></span>Đang trong ca từ ${hhmm(sh.checked_in_at)}</span>`
+    : (sh.checked_out_at
+        ? `<span class="pill">Đã xuống ca lúc ${hhmm(sh.checked_out_at)}</span>`
+        : (sh.has_shift ? `<span class="pill">Chưa lên ca</span>`
+                        : `<span class="pill">Hôm nay không có ca — bấm vẫn ghi nhận, không tính trễ</span>`));
+
+  return `<div class="card">
+    <div class="card-h"><span class="t">Ca hôm nay</span>
+      <span class="r">${sh.has_shift ? `${sh.shift_start}–${sh.shift_end} · giờ ${sh.location}`
+        : 'hôm nay nghỉ'}</span></div>
+    <div style="padding:14px 18px 4px">${state}</div>
+    <div class="punch">
+      <button class="pbtn ${sh.on_shift ? '' : 'go'}" onclick="punch('in')">
+        <span class="k">Bắt đầu</span>Lên ca</button>
+      <button class="pbtn ${sh.on_shift ? 'go' : ''}" onclick="punch('out')">
+        <span class="k">Kết thúc</span>Xuống ca</button>
+      <button class="pbtn" onclick="punch('log')">
+        <span class="k">Ghi nhận</span>Chấm công</button>
+    </div>
+    ${sh.rows.length ? `<div class="log">${sh.rows.slice().reverse().map(r => `
+      <div class="r"><span class="t">${hhmm(r.actual_at)}</span>
+        <span class="n">${r.kind_label}</span>
+        ${r.late_label ? `<span class="pill ${r.late_level === 'in5' ? 'amb' : 'red'}">${r.late_label}</span>`
+                       : `<span class="d">đúng giờ</span>`}</div>`).join('')}</div>` : ''}
+  </div>`;
+}
+
+function depCard(mine, locked) {
+  const holder = mine || locked;
+  const hLeft = holder ? leftOf(holder) : 0;
+  return `<div class="card"><div class="dep ${holder ? (hLeft < 0 ? 'over' : 'busy') : ''}">
+    <div class="ic">${(S.me.department || '?').slice(0, 2)}</div>
+    <div class="m">${holder
+      ? `<div class="a">${mine ? 'Bạn đang rời vị trí' : holder.user_name}</div>
+         <div class="b">${holder.type_name} · bộ phận đang khóa</div>`
+      : `<div class="a">Bộ phận đang trống</div>
+         <div class="b">${S.lane.headcount} nhân sự · bạn đi được</div>`}</div>
+    ${holder ? `<div class="cd" data-cd="${holder.id}">${clk(hLeft)}</div>` : ''}
+  </div></div>`;
+}
+
+function offCard() {
+  const o = S.offs;
+  const [y, m] = o.ym.split('-').map(Number);
+  const first = new Date(y, m - 1, 1);
+  const dim = new Date(y, m, 0).getDate();
+  const lead = first.getDay();
+  const today = new Date();
+  const isThis = today.getFullYear() === y && today.getMonth() + 1 === m;
+
+  // Ngày đã có đồng nghiệp cùng bộ phận nhận -> làm mờ ngay, khỏi bấm rồi mới báo lỗi
+  const takenBy = {};
+  (o.taken || []).forEach(t => { takenBy[t.day] = t.names.join(', '); });
+
+  const workSet = new Set(o.work_days || []);
+
+  let cells = '';
+  for (let i = 0; i < lead; i++) cells += '<div class="od blank"></div>';
+  for (let d = 1; d <= dim; d++) {
+    const day = `${o.ym}-${pad(d)}`;
+    const on = o.days.includes(day);                       // mình đã đăng ký
+    const hasShift = workSet.has(day);                     // lịch chính thức có xếp ca
+    const isToday = isThis && today.getDate() === d;
+    const busy = !on && takenBy[day];
+    const full = o.used >= o.max && !on;
+    const dis = o.locked || full || !!busy;
+
+    // 4 trạng thái: đăng ký & được duyệt / đăng ký nhưng vẫn phải làm /
+    // lịch cho nghỉ mà mình không xin / còn trống
+    let cls = '', tip = '';
+    if (on && o.has_schedule && hasShift) { cls = 'on rejected'; tip = 'Bạn xin nghỉ nhưng lịch vẫn xếp ca'; }
+    else if (on) { cls = 'on'; tip = o.has_schedule ? 'Đã được duyệt nghỉ' : 'Đã đăng ký, chờ xếp lịch'; }
+    else if (o.has_schedule && !hasShift) { cls = 'rosteroff'; tip = 'Lịch cho nghỉ (bạn không đăng ký)'; }
+    else if (busy) { cls = 'busy'; tip = `${takenBy[day]} đã nhận ngày này`; }
+
+    cells += `<button class="od ${cls} ${isToday ? 'today' : ''}"
+      ${dis ? 'disabled' : ''} ${tip ? `title="${tip}"` : ''}
+      onclick="toggleOff('${day}')">${d}</button>`;
+  }
+
+  return `<div class="card">
+    <div class="card-h"><span class="t">${o.has_schedule ? 'Lịch nghỉ' : 'Đăng ký nghỉ'}</span>
+      <span class="r">${o.locked ? '🔒 tháng đã khóa' : `đã chọn ${o.used}/${o.max} ngày`}</span></div>
+    ${o.has_schedule ? `<div class="offnote">
+      Lịch tháng này đã xếp xong. Bạn đăng ký ${o.used} ngày, được duyệt <b>${o.approved}</b> ngày${
+        o.rejected ? `, còn <b style="color:var(--red)">${o.rejected}</b> ngày vẫn phải làm` : ''}.
+      </div>` : `<div class="offnote">
+      Lịch tháng này chưa xếp. Đăng ký sớm để quản lý xếp ca theo nguyện vọng.
+      </div>`}
+    <div class="offnav">
+      <button class="btn btn-sm" onclick="moveMonth(-1)">‹</button>
+      <b>Tháng ${m}/${y}</b>
+      <button class="btn btn-sm" onclick="moveMonth(1)">›</button>
+    </div>
+    <div class="odow">${DOW_S.map(d => `<span>${d}</span>`).join('')}</div>
+    <div class="ogrid">${cells}</div>
+    <div class="offlegend">
+      <span><i class="sw on"></i>${o.has_schedule ? 'Được duyệt' : 'Đã đăng ký'}</span>
+      ${o.has_schedule ? '<span><i class="sw rejected"></i>Vẫn phải làm</span>' : ''}
+      ${o.has_schedule ? '<span><i class="sw rosteroff"></i>Lịch cho nghỉ</span>' : ''}
+      <span><i class="sw busy"></i>Người khác đã nhận</span>
+      <span><i class="sw"></i>Còn trống</span>
+    </div>
+    <div class="hint" style="margin:8px 0 16px">${o.locked
+      ? 'Quản lý đã khóa tháng này. Cần đổi thì báo quản lý.'
+      : `Chạm vào ngày để đăng ký hoặc bỏ. Tối đa ${o.max} ngày mỗi tháng,
+         và mỗi ngày bộ phận chỉ ${o.per_day} người nghỉ.`}</div>
+  </div>`;
+}
+
+const isIOS = /iP(hone|ad|od)/.test(navigator.userAgent)
+  || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const isStandalone = window.navigator.standalone === true
+  || (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
+
+/* Nhắc cài lên màn hình chính. Quan trọng: phải cài TRƯỚC khi bấm lần đầu,
+   vì lần bấm đầu tiên là lúc link gắn cứng vào thiết bị. */
+/* Trình duyệt chặn tiếng tới khi người dùng chạm màn hình lần đầu.
+   Nút này để chủ động mở khoá và xin quyền thông báo ngay đầu ca. */
+function soundCard() {
+  const cần = !Alarm.unlocked
+    || (('Notification' in window) && Notification.permission !== 'granted');
+  if (!cần) return '';
+  return `<div class="card snd">
+    <div class="ic">🔔</div>
+    <div class="m">
+      <div class="a">Bật âm báo cho ca này</div>
+      <div class="b">Cần bấm một lần mỗi khi mở app, trình duyệt mới cho phép kêu.
+        Bấm xong máy sẽ chuông và rung khi tới lượt điểm danh hoặc hết giờ rời vị trí.</div>
+    </div>
+    <button class="btn btn-dark" onclick="turnOnSound()">Bật</button>
+  </div>`;
+}
+
+async function turnOnSound() {
+  await Alarm.unlock();
+  if ('Notification' in window && Notification.permission === 'default') {
+    try { await Notification.requestPermission(); } catch (e) {}
+  }
+  Alarm.ring('rollcall');
+  toast('Đã bật âm báo',
+    Notification && Notification.permission === 'granted'
+      ? 'Máy sẽ chuông, rung và hiện thông báo khi tới lượt.'
+      : 'Máy sẽ chuông và rung. Cho phép thông báo để kêu cả khi tắt màn hình.', true);
+  render();
+}
+
+function installCard() {
+  if (isStandalone) return '';
+  if (localStorage.getItem('tt_hide_install') === '1') return '';
+  const bound = S.device && S.device.bound;
+
+  return `<div class="card install">
+    <div class="ic">⌂</div>
+    <div class="m">
+      <div class="a">Cài lên màn hình chính</div>
+      <div class="b">${isIOS
+        ? 'Bấm nút Chia sẻ ở thanh dưới → “Thêm vào MH chính”.'
+        : 'Mở menu ⋮ của trình duyệt → “Cài đặt ứng dụng” / “Thêm vào màn hình chính”.'}
+        ${bound ? '' : '<b> Cài xong rồi hãy bấm chấm công lần đầu</b> — lần bấm đầu tiên sẽ gắn link vào thiết bị.'}</div>
+    </div>
+    <button class="x" onclick="hideInstall()" aria-label="Ẩn">×</button>
+  </div>`;
+}
+function hideInstall() { localStorage.setItem('tt_hide_install', '1'); render(); }
+
+/* Thẻ điểm danh: hiện khi có lượt đang chờ trả lời. Đặt trên cùng, màu đỏ,
+   kèm đồng hồ đếm ngược tới hạn chót. */
+function rollCallCard() {
+  const rc = S.rollcall;
+  if (!rc) return '';
+  const left = Math.max(0, Math.round((rc.deadline_at - nowMs()) / 1000));
+  return `<div class="card rc">
+    <div class="m">
+      <div class="a">${rc.is_makeup ? 'Điểm danh bù' : 'Điểm danh'}</div>
+      <div class="b">${rc.is_makeup
+        ? 'Lượt này bị hoãn lúc bạn đang rời vị trí. Xác nhận lại để không bị tính vắng.'
+        : 'Xác nhận bạn đang có mặt. Quá giờ là tính vắng ca này.'}</div>
+    </div>
+    <div class="cd" id="rcCd">${clk(left)}</div>
+    <button class="btn btn-dark" onclick="answerRollCall()">Xác nhận</button>
+  </div>`;
+}
+
+async function answerRollCall() {
+  if (busy) return;
+  const k = askKey('điểm danh');
+  if (k === null) return;
+  busy = true;
+  const r = await api('/api/rollcall/answer', { key: k });
+  busy = false;
+  if (r.ok) Alarm.stop();
+  toast(r.ok ? 'Đã điểm danh' : 'Chưa xác nhận được', r.message || '', !!r.ok);
+  await load();
+}
+
+function render() {
+  const d = new Date(nowMs());
+  const mine = S.current, locked = S.locked_by;
+  const left = mine ? leftOf(mine) : 0, over = mine && left < 0;
+  const T = S.today;
+
+  const action = mine
+    ? `<div class="card card-p"><button class="btn btn-dark btn-block"
+        style="min-height:56px;font-size:17px;font-weight:700" onclick="act('/api/stop')">Dừng lại</button></div>`
+    : `<div class="card">
+        <div class="card-h"><span class="t">Rời vị trí</span></div>
+        ${locked ? `<div class="blocked" style="margin-top:14px">
+          <b>${locked.user_name}</b> đang “${locked.type_name}”. Chờ đến lượt rồi bấm lại.</div>` : ''}
+        <div class="acts">${S.types.map(t => `
+          <button class="act" ${t.disabled ? 'disabled' : ''} onclick="act('/api/start',{code:'${t.code}'})">
+            <div class="n">${t.name}</div>
+            <div class="d">${t.limit_minutes} phút${t.counts_toward_limit ? '' : ' · không khóa'}</div>
+          </button>`).join('')}</div></div>`;
+
+  // Có lượt điểm danh đang chờ thì kêu; xác nhận xong thì tắt
+  if (S.rollcall) Alarm.start('rollcall');
+  else if (Alarm.kind === 'rollcall') Alarm.stop();
+
+  $('#app').innerHTML = `
+    <div class="bar"><span class="nm">${S.me.name}</span><span class="sp"></span>
+      ${S.me.role === 'admin' ? '<a class="pill" href="/admin">Quản trị</a>' : ''}</div>
+    ${rollCallCard()}
+    ${soundCard()}
+    ${installCard()}
+    ${heroCard(d, mine, left, over)}
+    ${shiftCard()}
+    ${depCard(mine, locked)}
+    ${action}
+    <div class="card">
+      <div class="card-h"><span class="t">Rời vị trí hôm nay</span>
+        <span class="r">${T.count ? T.count + ' lượt' : 'chưa có lượt nào'}</span></div>
+      <div class="sum">
+        <div><div class="n">${T.count}</div><div class="l">Lượt</div></div>
+        <div><div class="n">${T.minutes}</div><div class="l">Phút</div></div>
+        <div><div class="n ${T.over ? 'red' : ''}">${T.over}</div><div class="l">Quá giờ</div></div>
+      </div>
+      ${T.rows.length ? `<div class="log">${T.rows.map(r => `
+        <div class="r"><span class="t">${hhmm(r.started_at)}</span>
+          <span class="n">${r.type_name}${r.closed_by === 'auto' ? ' · quên bấm dừng' : ''}</span>
+          <span class="d ${r.is_over_limit ? 'red' : ''}">${r.duration_sec == null ? 'đang chạy'
+            : Math.floor(r.duration_sec / 60) + 'p' + pad(r.duration_sec % 60)}</span></div>`).join('')}</div>` : ''}
+    </div>
+    ${offCard()}
+    <div class="hint">Mỗi bộ phận chỉ 1 người rời chỗ cùng lúc.<br>
+      Quên bấm “Dừng lại” thì hệ thống tự đóng sau khi quá giờ 30 phút và ghi chú lại.</div>`;
+}
+
+function tick() {
+  if (!S) return;
+  const mine = S.current, big = $('#big'), hero = $('#hero'), trk = $('#trk');
+  if (big) {
+    if (mine) {
+      const l = leftOf(mine);
+      big.textContent = clk(l);
+      hero.classList.toggle('over', l < 0);
+      // Hết giờ hoạt động -> báo động, dừng khi bấm Dừng lại
+      if (l < 0 && !S.rollcall) Alarm.start('overtime');
+      else if (l >= 0 && Alarm.kind === 'overtime') Alarm.stop();
+      if (trk) trk.style.width = pctOf(mine) + '%';
+      const sub = $('#heroSub');
+      if (sub && l < 0) sub.textContent = `Bắt đầu ${hhmm(mine.started_at)} · đã quá ${Math.floor(-l / 60)} phút`;
+    } else {
+      const c = clockParts();
+      big.innerHTML = `${c[0]}<span class="s">:</span>${c[1]}<span class="s">:</span>${c[2]}`;
+      if (Alarm.kind === 'overtime') Alarm.stop();
+    }
+  }
+  const rcEl = $('#rcCd');
+  if (rcEl && S.rollcall) {
+    const l = Math.round((S.rollcall.deadline_at - nowMs()) / 1000);
+    if (l <= 0) load(); else rcEl.textContent = clk(l);
+  }
+
+  document.querySelectorAll('[data-cd]').forEach(el => {
+    const h = (S.current && S.current.id == el.dataset.cd) ? S.current
+            : (S.locked_by && S.locked_by.id == el.dataset.cd) ? S.locked_by : null;
+    if (!h) return;
+    const l = leftOf(h);
+    el.textContent = clk(l);
+    const box = el.closest('.dep');
+    if (box && l < 0) { box.classList.add('over'); box.classList.remove('busy'); }
+  });
+}
+
+load();
+setInterval(tick, 1000);
+setInterval(load, 20000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) load(); });
+</script>
+</body>
+</html>
