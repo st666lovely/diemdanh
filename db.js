@@ -138,6 +138,16 @@ CREATE TABLE IF NOT EXISTS roll_calls (
 );
 CREATE INDEX IF NOT EXISTS idx_rc_user   ON roll_calls(user_id, day);
 CREATE INDEX IF NOT EXISTS idx_rc_status ON roll_calls(status, due_at);
+
+-- Miễn báo cáo cho một ca cụ thể: ca không phát sinh việc, hoặc quản lý cho phép.
+CREATE TABLE IF NOT EXISTS report_exempt (
+  user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  day        TEXT    NOT NULL,
+  reason     TEXT,
+  by_admin   INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (user_id, day)
+);
 `);
 
 // Cột giờ ca — thêm sau nên dùng ALTER có kiểm tra, tránh lỗi khi chạy lại
@@ -151,6 +161,9 @@ CREATE INDEX IF NOT EXISTS idx_rc_status ON roll_calls(status, due_at);
   if (!cols.includes('key_hash'))  db.exec('ALTER TABLE users ADD COLUMN key_hash TEXT');
   if (!cols.includes('key_month')) db.exec('ALTER TABLE users ADD COLUMN key_month TEXT');
   if (!cols.includes('key_set_at'))db.exec('ALTER TABLE users ADD COLUMN key_set_at INTEGER');
+  // Mã nhân viên dùng để khớp dòng trong sheet báo cáo. KHÔNG bí mật —
+  // cố ý tách khỏi mã cá nhân, vì sheet cả team cùng xem.
+  if (!cols.includes('emp_code')) db.exec('ALTER TABLE users ADD COLUMN emp_code TEXT');
 
   const oc = db.prepare('PRAGMA table_info(day_offs)').all().map((c) => c.name);
   if (!oc.includes('brand'))      db.exec('ALTER TABLE day_offs ADD COLUMN brand TEXT');
@@ -1057,10 +1070,91 @@ function rollCallReport(f = {}, scope = null) {
   return { rows, stats: s };
 }
 
+/* ============================================================
+   MÃ NHÂN VIÊN — để khớp dòng trong sheet báo cáo
+   Không bí mật, lộ ra cũng không mở được gì.
+   ============================================================ */
+const DEPT_PREFIX = { 'CS': 'CS', 'CS ONL': 'CSO', 'VIP': 'VIP', 'RISK': 'RSK', 'RISK ONL': 'RSO' };
+
+function ensureEmpCode(user) {
+  if (user.emp_code) return user.emp_code;
+  const pre = DEPT_PREFIX[user.department] || 'NV';
+  const used = new Set(db.prepare('SELECT emp_code FROM users WHERE emp_code IS NOT NULL')
+    .all().map((r) => r.emp_code));
+  let n = 1, code;
+  do { code = pre + String(n++).padStart(2, '0'); } while (used.has(code));
+  db.prepare('UPDATE users SET emp_code=? WHERE id=?').run(code, user.id);
+  return code;
+}
+
+function setEmpCode(userId, code) {
+  const c = String(code || '').trim().toUpperCase();
+  if (!/^[A-Z0-9._-]{2,16}$/.test(c)) {
+    return { ok: false, message: 'Mã nhân viên 2–16 ký tự, chỉ chữ, số và . _ -' };
+  }
+  const dup = db.prepare('SELECT id FROM users WHERE emp_code=? AND id<>?').get(c, userId);
+  if (dup) return { ok: false, message: `Mã ${c} đã có người dùng.` };
+  db.prepare('UPDATE users SET emp_code=? WHERE id=?').run(c, userId);
+  return { ok: true, message: `Đã đổi mã nhân viên thành ${c}.` };
+}
+
+/* Cấp mã cho mọi người chưa có */
+function backfillEmpCodes() {
+  const list = db.prepare("SELECT * FROM users WHERE role='staff' AND emp_code IS NULL").all();
+  list.forEach(ensureEmpCode);
+  return list.length;
+}
+
+/* ============================================================
+   NỢ BÁO CÁO
+   Có ca trong lịch mà không có dòng nào trong sheet = nợ.
+   ============================================================ */
+const REPORT_DEPTS = (process.env.REPORT_DEPTS || 'CS,CS ONL,VIP,RISK,RISK ONL')
+  .split(',').map((x) => x.trim().toUpperCase()).filter(Boolean);
+const REPORT_GRACE_MIN   = Math.max(0, Number(process.env.REPORT_GRACE_MIN) || 60);
+const REPORT_BLOCK_AFTER = Math.max(1, Number(process.env.REPORT_BLOCK_AFTER) || 1);
+const REPORT_ALERT_AFTER = Math.max(1, Number(process.env.REPORT_ALERT_AFTER) || 3);
+
+const isExempt = (userId, day) =>
+  !!db.prepare('SELECT 1 FROM report_exempt WHERE user_id=? AND day=?').get(userId, day);
+
+function setExempt(userId, day, reason, byAdmin) {
+  db.prepare(`INSERT OR REPLACE INTO report_exempt (user_id,day,reason,by_admin,created_at)
+              VALUES (?,?,?,?,?)`).run(userId, day, reason || null, byAdmin ? 1 : 0, now());
+  return { ok: true, message: `Đã đánh dấu ca ${day.split('-').reverse().join('/')} không phát sinh.` };
+}
+
+function clearExempt(userId, day) {
+  db.prepare('DELETE FROM report_exempt WHERE user_id=? AND day=?').run(userId, day);
+  return { ok: true, message: 'Đã bỏ đánh dấu miễn báo cáo.' };
+}
+
+/* Các ngày đã có ca của một người, tính lùi N ngày, KHÔNG tính hôm nay */
+function pastShiftDays(user, backDays = 14) {
+  const tz = tzOf(user.location);
+  const today = dayInTz(now(), tz);
+  const rows = db.prepare(
+    'SELECT day FROM shift_days WHERE user_id=? AND day<? ORDER BY day DESC LIMIT ?'
+  ).all(user.id, today, backDays);
+  return rows.map((r) => r.day);
+}
+
+function todayOf(user) {
+  return dayInTz(now(), tzOf(user.location));
+}
+
+/* Ca hôm nay đã kết thúc chưa (cộng thêm thời gian ân hạn) */
+function shiftEndedToday(user) {
+  const w = shiftWindow(user, now());
+  if (!w.length) return null;
+  const c = w[w.length - 1];
+  return now() > c.end + REPORT_GRACE_MIN * 60000;
+}
+
 const allUsers = (scope = null) =>
   db.prepare(
     `SELECT u.id,u.name,u.key,u.department,u.brand,u.location,u.role,u.is_active,
-            u.device_id,u.device_seen_at,u.key_month,
+            u.device_id,u.device_seen_at,u.key_month,u.emp_code,
             CASE WHEN u.key_hash IS NULL THEN 0 ELSE 1 END has_key,
             (SELECT COUNT(*) FROM shift_days s WHERE s.user_id=u.id AND s.day LIKE ?) work_days
      FROM users u WHERE (? IS NULL OR u.brand=? OR u.role='super')
@@ -1083,6 +1177,9 @@ module.exports = {
   LOCATIONS, LOCATION_TZ, tzOf, zonedToUtc, dayInTz, shiftWindow,
   scopeOf, isSuper, inScope,
   setPersonalKey, hasPersonalKey, checkPersonalKey, KEY_RE,
+  ensureEmpCode, setEmpCode, backfillEmpCodes,
+  isExempt, setExempt, clearExempt, pastShiftDays, todayOf, shiftEndedToday,
+  REPORT_DEPTS, REPORT_GRACE_MIN, REPORT_BLOCK_AFTER, REPORT_ALERT_AFTER,
   sweepRollCalls, releaseMakeups, activeRollCall, answerRollCall, rollCallReport,
   RC_PER_SHIFT, RC_WINDOW_MIN, RC_MAKEUP_MIN,
   applySchedule, scheduleOf, scheduleSummary,
