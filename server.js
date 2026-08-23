@@ -423,6 +423,8 @@ app.get('/api/admin/rollcalls', requireUser, requireAdmin, (req, res) => {
   D.sweepRollCalls();
   res.json({
     ...D.rollCallReport(req.query, req.scope),
+    upcoming: D.upcomingRollCalls(req.scope),
+    server_time: Date.now(),
     users: D.allUsers(req.scope).filter((u) => u.role === 'staff'),
     departments: D.DEPTS,
     brands: req.scope ? [req.scope] : D.BRANDS,
@@ -512,7 +514,7 @@ async function reportGate(req, res, kind) {
       ok: false, report_required: true, report: st,
       message: `Chưa có dòng nào của ${st.emp_code} hôm nay ở bất kỳ file nào`
              + (ten ? ` (${ten})` : '') + '. '
-             + 'Hoàn thành báo cáo và bấm "Tôi đã điền rồi". '
+             + 'Điền một trong các file rồi bấm "Tôi đã điền rồi". '
              + 'Ca không phát sinh việc gì thì bấm "Ca không phát sinh".',
     };
   }
@@ -542,7 +544,7 @@ app.post('/api/report/recheck', requireUser, async (req, res) => {
         ? `Đã thấy ${st.today.rows} dòng của bạn hôm nay`
           + (Object.keys(st.today.sources || {}).length
               ? ` (${Object.entries(st.today.sources).map(([k, v]) => `${k}: ${v}`).join(' · ')})` : '') + '.'
-        : 'Không tìm thấy dữ liệu báo cáo của bạn. Kiểm tra cột Ngày và cột MaNV đã điền đúng chưa.',
+        : 'Vẫn chưa thấy dòng nào của bạn ở file nào. Kiểm tra cột Ngày và cột MaNV đã điền đúng chưa.',
   });
 });
 
