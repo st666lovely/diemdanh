@@ -511,21 +511,34 @@ async function loadReports(refresh) {
   const d = await r.json();
 
   const sh = d.sheet;
-  const shBox = sh.error
+  const dsFile = (sh.sheets || []).map(x => `
+    <div class="shrow ${x.error ? 'bad' : 'ok'}">
+      <span class="d"></span>
+      <b>${esc(x.name)}</b>
+      <span class="sub">tab ${esc(x.tab)} · ${x.id_short}</span>
+      <span class="sp"></span>
+      ${x.error ? `<span class="pill red">${esc(x.error)}</span>`
+                : `<span class="pill pri">${x.rows} dòng</span>`}
+    </div>`).join('');
+
+  const shBox = !sh.configured
     ? `<div class="card card-p" style="margin-bottom:16px;background:var(--red-s);border-color:var(--red-l)">
-        <b style="color:var(--red)">Không đọc được sheet: ${esc(sh.error)}</b>
+        <b style="color:var(--red)">Chưa khai file báo cáo nào</b>
         <div class="sub" style="margin-top:6px;line-height:1.6">
-          Khi sheet lỗi, hệ thống <b>không chặn ai cả</b> — thà bỏ sót còn hơn khóa nhầm cả team.<br>
-          Kiểm tra: đã đặt <span class="mono">REPORT_SHEET_ID</span> chưa, và đã chia sẻ file cho
-          Service Account ở mức Người xem chưa.</div></div>`
+          Thêm biến <span class="mono">REPORT_SHEETS</span> trên Render, mỗi dòng một file:<br>
+          <span class="mono">Tên hiển thị | spreadsheetId | Tên tab</span></div></div>`
     : `<div class="card card-p" style="margin-bottom:16px;background:#FAFBFB">
-        <div class="sub" style="line-height:1.7">
-          Đọc <b>${sh.rows}</b> dòng từ tab <span class="mono">${esc(sh.tab)}</span>,
+        <div class="sub" style="line-height:1.7;margin-bottom:10px">
+          Đọc <b>${sh.count}</b> file, tổng <b>${sh.rows}</b> dòng,
           làm mới lúc ${sh.fetched_at ? hms(sh.fetched_at) : '—'} (mỗi ${sh.ttl_min} phút).<br>
-          Có ca trong lịch mà không có dòng nào mang mã NV của mình = nợ.
+          Có dòng ở <b>bất kỳ file nào</b> trong ngày là tính đã điền.
           Nợ từ <b>${d.config.block_after}</b> ca thì không vào ca mới được,
           từ <b>${d.config.alert_after}</b> ca thì cảnh báo khóa BO.
-        </div></div>`;
+        </div>
+        ${dsFile}
+        ${sh.error ? `<div class="sub" style="margin-top:10px;color:var(--red)">
+          <b>Mọi file đều lỗi — hệ thống không chặn ai cả</b>, thà bỏ sót còn hơn khóa nhầm cả team.</div>` : ''}
+      </div>`;
 
   const cell = (c) => {
     const cls = c.state === 'done' ? 'ok' : c.state === 'exempt' ? 'ex' : 'miss';
