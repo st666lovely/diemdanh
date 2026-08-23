@@ -330,6 +330,18 @@ app.post('/api/admin/users/:id/personal-key', requireUser, requireAdmin, (req, r
   res.status(r.ok ? 200 : 400).json({ ...r, users: D.allUsers(req.scope) });
 });
 
+/* Bắn điểm danh thủ công */
+app.post('/api/admin/rollcalls/fire', requireUser, requireAdmin, (req, res) => {
+  const b = req.body || {};
+  const r = D.fireRollCall({
+    who: String(b.who || 'all'),
+    windowMin: Math.min(30, Math.max(1, Number(b.window_min) || D.RC_WINDOW_MIN)),
+    scope: req.scope,
+  });
+  D.audit(req.user, 'rollcall_fire', `${b.who} -> ${r.fired.length} người`, req.ip);
+  res.json(r);
+});
+
 /* Bảng theo dõi nợ báo cáo */
 app.get('/api/admin/reports', requireUser, requireAdmin, async (req, res) => {
   D.backfillEmpCodes();
@@ -351,17 +363,25 @@ app.get('/api/admin/reports', requireUser, requireAdmin, async (req, res) => {
 
   const rows = perUser.map(({ u, full, days, today }) => {
     const code = D.ensureEmpCode(full);
-    const cells = [...days].reverse().map((d) => {
+
+    // Ngày cũ + HÔM NAY (nếu hôm nay có ca). Trước đây thiếu hôm nay nên
+    // điền xong vẫn không thấy ô nào sáng lên.
+    const allDays = [...days].reverse();
+    if (D.hasShiftOn(full.id, today)) allDays.push(today);
+
+    const cells = allDays.map((d) => {
       const hit = sum.byKey[`${code}|${d}`];
       return {
         day: d,
+        is_today: d === today,
         rows: hit ? hit.count : 0,
         amount: hit ? hit.amount : 0,
         exempt: D.isExempt(full.id, d),
         state: hit ? 'done' : (D.isExempt(full.id, d) ? 'exempt' : 'missing'),
       };
     });
-    const owing = cells.filter((c) => c.state === 'missing');
+    // Hôm nay chưa hết ca thì chưa tính là nợ
+    const owing = cells.filter((c) => c.state === 'missing' && !c.is_today);
     const t = sum.byKey[`${code}|${today}`];
     return {
       id: u.id, name: u.name, emp_code: code,
@@ -585,6 +605,15 @@ app.post('/api/punch', requireUser, requireKey, async (req, res) => {
   }
 
   const r = D.punch(req.user, kind, req.ip, req.get('user-agent'));
+
+  if (r.ok && kind === 'out') {
+    const n = D.cancelPendingRollCalls(req.user.id);
+    if (n) {
+      r.message += ` Đã huỷ ${n} lượt điểm danh còn treo.`;
+      D.audit(req.user, 'rollcall_cancel_on_out', String(n), req.ip);
+    }
+  }
+
   res.status(r.ok ? 200 : 400).json({ ...r, shift: D.shiftToday(req.user) });
 });
 
