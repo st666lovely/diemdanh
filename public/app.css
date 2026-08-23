@@ -175,6 +175,20 @@ body.alarming::after{
 .snd .m .b{font-size:13px;color:#7A4A08;margin-top:3px;line-height:1.5}
 .snd .btn{flex:none}
 
+/* ===== Thẻ báo cáo ===== */
+.rep{display:flex;align-items:flex-start;gap:12px;padding:14px 14px 14px 16px;margin-bottom:12px;
+  background:var(--red-s);border-color:var(--red-l)}
+.rep .ic{width:34px;height:34px;border-radius:10px;flex:none;display:flex;align-items:center;
+  justify-content:center;background:#fff;color:var(--red);font-size:18px;font-weight:800}
+.rep .m{flex:1;min-width:0}
+.rep .m .a{font-weight:700;font-size:15px;color:var(--red)}
+.rep .m .b{font-size:13px;color:#8E2A21;margin-top:3px;line-height:1.5}
+.rep .acts2{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
+.rep.ok{background:var(--pri-s);border-color:#CFE5DD}
+.rep.ok .ic{color:var(--pri)}
+.rep.ok .m .a{color:var(--pri)}
+.rep.ok .m .b{color:#2C5F4E}
+
 /* ===== Thẻ điểm danh ===== */
 .rc{display:flex;align-items:center;gap:14px;padding:16px 18px;margin-bottom:12px;
   background:var(--red-s);border-color:var(--red-l)}
@@ -329,6 +343,17 @@ td.wide,th.wide{width:100%;white-space:normal}
 /* Thanh so sánh tổng phút trễ giữa các nhân viên — nhìn lướt thấy ai nổi bật */
 .lbar{height:4px;background:#EDF0EE;border-radius:4px;margin:5px 0 3px;overflow:hidden}
 .lbar i{display:block;height:100%;background:var(--red);border-radius:4px}
+
+/* ===== Lưới theo dõi báo cáo ===== */
+.grid14{display:flex;gap:3px;flex-wrap:wrap;max-width:340px}
+.gcell{width:14px;height:18px;border-radius:3px;display:inline-block;flex:none}
+.gcell.ok{background:var(--pri)}
+.gcell.ex{background:#D7DEDB;border:1px solid var(--line2)}
+.gcell.miss{background:var(--red)}
+.legend{display:flex;gap:14px;align-items:center;font-size:12.5px;color:var(--tx3);margin-left:auto}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+tr.row-alert{background:var(--red-s)}
+tr.row-alert:hover{background:#F8DEDA}
 
 /* ===== Chip lọc lịch off ===== */
 .chips{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:16px}
