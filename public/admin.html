@@ -676,6 +676,11 @@ async function loadRollCalls() {
       <div style="margin-top:5px;display:inline-flex;gap:5px">
         <span class="pill">${x.department || '—'}</span>
         ${x.brand ? `<span class="pill pri">${x.brand}</span>` : ''}</div></td>
+    <td style="text-align:center">${x.so_ngay || '<span class="sub">—</span>'}</td>
+    <td style="text-align:center">
+      <span class="pill ${x.lech_muc ? 'amb' : ''}" title="Mức chung: ${d.per_shift} lượt/ngày">${x.tb_ngay || 0}</span>
+      ${x.lech_muc ? '<div class="sub" style="margin-top:3px">lệch mức chung</div>' : ''}
+    </td>
     <td style="text-align:center;font-weight:700">${x.tong}</td>
     <td style="text-align:center"><span class="pill pri">${x.da_diem_danh}</span></td>
     <td style="text-align:center">${x.vang ? `<span class="pill red">${x.vang}</span>` : '<span class="sub">—</span>'}</td>
@@ -731,16 +736,21 @@ async function loadRollCalls() {
     ${punchFilters({ ...d, kinds: {}, levels: {}, is_admin: true }, 'rc')}
 
     <div class="tw"><table>
-      <thead><tr><th class="wide">Nhân viên</th><th style="text-align:center">Tổng lượt</th>
+      <thead><tr><th class="wide">Nhân viên</th>
+        <th style="text-align:center">Số ngày<br>có lượt</th>
+        <th style="text-align:center">TB<br>lượt/ngày</th>
+        <th style="text-align:center">Tổng lượt</th>
         <th style="text-align:center">Đã điểm danh</th><th style="text-align:center">Vắng</th>
         <th style="text-align:center">Lượt bù</th><th style="text-align:center">Đang chờ</th>
         <th style="text-align:center">Đã huỷ</th><th style="text-align:center">Tỉ lệ</th><th></th></tr></thead>
-      <tbody>${trs || `<tr><td colspan="9" class="empty">
+      <tbody>${trs || `<tr><td colspan="11" class="empty">
         Chưa có lượt điểm danh nào.<br>
         <span class="sub">Hệ thống chỉ sinh điểm danh cho người <b>đang trong ca theo lịch</b>.
         Chưa nhập lịch ca tháng thì không có lượt nào.</span></td></tr>`}</tbody>
     </table></div>
-    <div class="sub" style="margin-top:10px">Xếp theo số lượt vắng giảm dần</div>`;
+    <div class="sub" style="margin-top:10px">Xếp theo số lượt vắng giảm dần ·
+      Mức chung hiện tại: ${d.per_shift} lượt/ngày mỗi người — hàng nào có nhãn "lệch mức chung"
+      là bị bắn thêm/ít hơn (bắn tay, lên nhiều ca trong ngày...)</div>`;
 }
 
 const RC_STATUS_PILL = {
