@@ -553,7 +553,7 @@ function reportCard() {
         ? `Ngày ${nợ.slice(0, 6).join(', ')}${nợ.length > 6 ? '…' : ''}. Còn nợ thì không vào ca mới được.`
         : `Chưa có dòng nào mang mã <b>${REP.emp_code}</b> hôm nay ở bất kỳ file nào.`
           + ((REP.sheets || []).length ? `<br>Các file: ${REP.sheets.map(x => x.name).join(', ')}.` : '')
-          + ' Điền một file bất kỳ rồi bấm "Tôi đã điền rồi".'}</div>
+          + ' Hoàn thành báo cáo và bấm "Đã hoàn thành".'}</div>
       <div class="acts2">
         <button class="btn btn-sm" onclick="recheckReport()">Tôi đã điền rồi</button>
         ${noHomNay ? '<button class="btn btn-sm" onclick="noActivity()">Ca không phát sinh</button>' : ''}
