@@ -260,6 +260,12 @@ async function punch(kind) {
   const r = await api('/api/punch', { kind, key: k });
   busy = false;
   if (r.key_required) { toast('Mã cá nhân', r.message, false); return; }
+  if (r.report_required) {
+    if (r.report) REP = r.report;
+    toast('Chưa nộp báo cáo', r.message, false);
+    render();
+    return;
+  }
   toast(r.ok ? (r.late_level ? 'Đã ghi nhận — có trễ' : 'Đã ghi nhận') : 'Chưa thực hiện được',
         r.message || '', r.ok && !r.late_level);
   await load();
@@ -513,6 +519,64 @@ async function answerRollCall() {
   await load();
 }
 
+/* Thẻ nợ báo cáo — hiện khi còn ca chưa điền hoặc hôm nay chưa có dòng nào */
+let REP = null;
+
+function reportCard() {
+  if (!REP || REP.off || REP.sheet_error) return '';
+  const t = REP.today;
+  const noHomNay = t && t.rows === 0 && !t.exempt;
+  if (!REP.owing.length && !noHomNay) {
+    if (!t || !t.rows) return '';
+    return `<div class="card rep ok">
+      <div class="ic">✓</div>
+      <div class="m"><div class="a">Báo cáo hôm nay: ${t.rows} dòng</div>
+        <div class="b">Mã của bạn trong sheet: <b>${REP.emp_code}</b>${
+          t.amount ? ` · tổng ${t.amount.toLocaleString('vi-VN')}đ` : ''}</div></div>
+    </div>`;
+  }
+
+  const nợ = REP.owing.map(d => d.split('-').reverse().slice(0, 2).join('/'));
+  return `<div class="card rep">
+    <div class="ic">!</div>
+    <div class="m">
+      <div class="a">${REP.owing.length ? `Nợ báo cáo ${REP.owing.length} ca` : 'Hôm nay chưa có dòng nào'}</div>
+      <div class="b">${REP.owing.length
+        ? `Ngày ${nợ.slice(0, 6).join(', ')}${nợ.length > 6 ? '…' : ''}. Còn nợ thì không vào ca mới được.`
+        : `Sheet chưa có dòng nào mang mã <b>${REP.emp_code}</b> hôm nay. Điền xong bấm "Tôi đã điền rồi".`}</div>
+      <div class="acts2">
+        <button class="btn btn-sm" onclick="recheckReport()">Tôi đã điền rồi</button>
+        ${noHomNay ? '<button class="btn btn-sm" onclick="noActivity()">Ca không phát sinh</button>' : ''}
+      </div>
+    </div>
+  </div>`;
+}
+
+async function loadReport(force) {
+  try {
+    const r = await fetch('/api/report/status' + (force ? '?refresh=1' : ''));
+    if (r.ok) { REP = await r.json(); render(); }
+  } catch (e) {}
+}
+
+async function recheckReport() {
+  if (busy) return; busy = true;
+  const r = await api('/api/report/recheck', {});
+  busy = false;
+  if (r.report) REP = r.report;
+  toast(r.report && r.report.today && r.report.today.rows ? 'Đã thấy báo cáo' : 'Chưa thấy',
+        r.message || '', !!(r.report && r.report.today && r.report.today.rows));
+  render();
+}
+
+async function noActivity() {
+  const lý = prompt('Ca này không phát sinh việc gì?\n\nGhi rõ lý do (ít nhất 10 ký tự):');
+  if (!lý) return;
+  const r = await api('/api/report/no-activity', { reason: lý.trim() });
+  toast(r.ok ? 'Đã ghi nhận' : 'Chưa ghi được', r.message || '', !!r.ok);
+  if (r.ok) loadReport(true);
+}
+
 function render() {
   const d = new Date(nowMs());
   const mine = S.current, locked = S.locked_by;
@@ -540,6 +604,7 @@ function render() {
     <div class="bar"><span class="nm">${S.me.name}</span><span class="sp"></span>
       ${S.me.role === 'admin' ? '<a class="pill" href="/admin">Quản trị</a>' : ''}</div>
     ${rollCallCard()}
+    ${reportCard()}
     ${soundCard()}
     ${installCard()}
     ${heroCard(d, mine, left, over)}
@@ -603,6 +668,8 @@ function tick() {
 }
 
 load();
+loadReport();
+setInterval(() => loadReport(), 5 * 60000);   // 5 phút đọc lại một lần
 setInterval(tick, 1000);
 setInterval(load, 20000);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) load(); });
