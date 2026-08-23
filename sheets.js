@@ -10,10 +10,31 @@
 const { google } = require('googleapis');
 const logger = console;
 
-const SHEET_ID  = process.env.REPORT_SHEET_ID  || '';
-const SHEET_TAB = process.env.REPORT_SHEET_TAB || 'Nhập liệu';
-const RANGE     = `${SHEET_TAB}!A1:Z5000`;
-const TTL_MS    = Math.max(1, Number(process.env.REPORT_SHEET_TTL_MIN) || 10) * 60000;
+const TTL_MS = Math.max(1, Number(process.env.REPORT_SHEET_TTL_MIN) || 10) * 60000;
+
+/* Nhiều file báo cáo cùng lúc. Khai trong REPORT_SHEETS, mỗi dòng một file:
+     Tên hiển thị | spreadsheetId | Tên tab
+   Có dòng ở BẤT KỲ file nào trong ngày là tính đã điền — vì mỗi ngày RISK
+   chỉ phát sinh một hai loại việc, không phải cả ba. */
+function parseSheetList() {
+  const raw = (process.env.REPORT_SHEETS || '').trim();
+
+  if (raw) {
+    return raw.split(/[\n;]+/).map((line) => {
+      const p = line.split('|').map((x) => x.trim());
+      if (p.length < 2 || !p[1]) return null;
+      return { name: p[0] || 'Báo cáo', id: p[1], tab: p[2] || 'Nhập liệu' };
+    }).filter(Boolean);
+  }
+
+  // Tương thích ngược với cấu hình một file
+  const single = process.env.REPORT_SHEET_ID || '';
+  return single
+    ? [{ name: 'Báo cáo', id: single, tab: process.env.REPORT_SHEET_TAB || 'Nhập liệu' }]
+    : [];
+}
+
+const SHEETS = parseSheetList();
 
 /* Tên cột chấp nhận nhiều cách viết, bỏ dấu và khoảng trắng trước khi so */
 const ALIASES = {
@@ -30,6 +51,25 @@ const ALIASES = {
 const norm = (h) => String(h ?? '')
   .toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
   .replace(/đ/g, 'd').replace(/\s+/g, '');
+
+/* Tên cột mỗi sheet mỗi khác: "Ngày", "Ngày phát hiện", "Ngày xử lý"...
+   Nên sau khi dò tên chính xác thì dò tiếp theo tiền tố. */
+const PREFIX_RULES = [
+  [/^ngay/,                  'date'],       // Ngày, Ngày phát hiện, Ngày xử lý
+  [/^(manv|manhanvien)/,     'emp_code'],
+  [/^(nguoixuly|nguoiduyet|nguoithuchien)/, 'approver'],
+  [/^sotien/,                'amount'],     // Số tiền, Số tiền liên quan
+  [/^(ketqua|trangthai)/,    'result'],
+  [/^loai/,                  'kind'],       // Loại, Loại gian lận
+  [/^lydo/,                  'reason'],
+];
+
+function fieldOf(header) {
+  const n = norm(header);
+  if (ALIASES[n]) return ALIASES[n];
+  for (const [re, field] of PREFIX_RULES) if (re.test(n)) return field;
+  return null;
+}
 
 /* Ô ngày có thể là chuỗi "22/08/2026" hoặc số serial của Sheets */
 function parseDay(v) {
@@ -51,10 +91,30 @@ function parseDay(v) {
   return null;
 }
 
+/* Số tiền có thể là "1.266.000" (chấm ngăn nghìn kiểu VN), "1,266,000" (kiểu Anh),
+   hoặc "1266000". Đoán theo dấu phân cách cuối cùng. */
 function parseAmount(v) {
   if (v == null || v === '') return 0;
   if (typeof v === 'number') return v;
-  const n = Number(String(v).replace(/[^\d.-]/g, ''));
+
+  let s = String(v).replace(/[^\d.,-]/g, '').trim();
+  if (!s) return 0;
+
+  const lastDot = s.lastIndexOf('.');
+  const lastComma = s.lastIndexOf(',');
+
+  if (lastDot >= 0 && lastComma >= 0) {
+    // Có cả hai: dấu đứng sau là dấu thập phân
+    if (lastDot > lastComma) s = s.replace(/,/g, '');
+    else s = s.replace(/\./g, '').replace(',', '.');
+  } else if (lastDot >= 0) {
+    // Chỉ có chấm: 3 số phía sau thì là ngăn nghìn kiểu VN
+    s = /\.\d{3}$/.test(s) || /\.\d{3}\./.test(s) ? s.replace(/\./g, '') : s;
+  } else if (lastComma >= 0) {
+    s = /,\d{3}$/.test(s) || /,\d{3},/.test(s) ? s.replace(/,/g, '') : s.replace(',', '.');
+  }
+
+  const n = Number(s);
   return Number.isFinite(n) ? n : 0;
 }
 
@@ -72,38 +132,51 @@ function client() {
   return _client;
 }
 
-/* Bộ nhớ đệm: sheet đọc mỗi 10 phút, trừ khi ép làm mới */
-let _cache = { at: 0, rows: [], error: null, headers: [] };
+/* Bộ nhớ đệm riêng cho từng file */
+const _caches = new Map();          // id -> { at, rows, headers, error, name, tab }
 
-async function fetchRows(force = false) {
-  if (!force && Date.now() - _cache.at < TTL_MS && !_cache.error) return _cache;
-  if (!SHEET_ID) {
-    _cache = { at: Date.now(), rows: [], headers: [], error: 'Chưa cấu hình REPORT_SHEET_ID' };
-    return _cache;
-  }
+function blank(sh, error) {
+  return { at: Date.now(), rows: [], headers: [], error, name: sh.name, tab: sh.tab, id: sh.id };
+}
 
+async function fetchOne(sh, force = false) {
+  const prev = _caches.get(sh.id);
+  if (!force && prev && Date.now() - prev.at < TTL_MS && !prev.error) return prev;
+
+  let _cache;
   try {
     const res = await client().spreadsheets.values.get({
-      spreadsheetId: SHEET_ID, range: RANGE,
+      spreadsheetId: sh.id, range: `${sh.tab}!A1:Z5000`,
       valueRenderOption: 'UNFORMATTED_VALUE',
       dateTimeRenderOption: 'SERIAL_NUMBER',
     });
 
     const grid = res.data.values || [];
     if (!grid.length) {
-      _cache = { at: Date.now(), rows: [], headers: [], error: 'Sheet rỗng' };
+      _cache = blank(sh, 'Tab rỗng');
+      _caches.set(sh.id, _cache);
       return _cache;
     }
 
     // Dòng tiêu đề: dòng đầu tiên có từ 3 cột nhận diện được trở lên
     let hIdx = 0, best = 0;
     for (let i = 0; i < Math.min(grid.length, 10); i++) {
-      const hits = (grid[i] || []).filter((c) => ALIASES[norm(c)]).length;
+      const hits = (grid[i] || []).filter((c) => fieldOf(c)).length;
       if (hits > best) { best = hits; hIdx = i; }
     }
     const headers = grid[hIdx] || [];
     const map = {};
-    headers.forEach((h, i) => { const k = ALIASES[norm(h)]; if (k) map[k] = i; });
+    // Cột nào khớp trước thì giữ, không để cột sau ghi đè cột đã nhận
+    headers.forEach((h, i) => { const k = fieldOf(h); if (k && map[k] === undefined) map[k] = i; });
+
+    if (map.date === undefined) {
+      _cache = blank(sh, 'Không tìm thấy cột ngày. Đặt tên cột bắt đầu bằng "Ngày".');
+      _caches.set(sh.id, _cache); return _cache;
+    }
+    if (map.emp_code === undefined) {
+      _cache = blank(sh, 'Không tìm thấy cột MaNV. Thêm cột "MaNV" và điền mã vào mỗi dòng.');
+      _caches.set(sh.id, _cache); return _cache;
+    }
 
     const rows = [];
     for (let r = hIdx + 1; r < grid.length; r++) {
@@ -116,6 +189,7 @@ async function fetchRows(force = false) {
       if (!day || (!emp && !approver)) continue;      // dòng chưa điền xong thì bỏ qua
 
       rows.push({
+        source: sh.name, sheet_id: sh.id,
         row: r + 1, day, emp_code: emp, approver,
         kind:   String(line[map.kind] ?? '').trim(),
         result: String(line[map.result] ?? '').trim(),
@@ -125,19 +199,42 @@ async function fetchRows(force = false) {
       });
     }
 
-    _cache = { at: Date.now(), rows, headers, error: null, hasEmpCol: map.emp_code !== undefined };
+    _cache = { at: Date.now(), rows, headers, error: null, name: sh.name, tab: sh.tab, id: sh.id };
+    _caches.set(sh.id, _cache);
     return _cache;
 
   } catch (e) {
     const msg = e.code === 403
-      ? 'Service Account chưa được chia sẻ quyền xem file.'
-      : e.code === 404 ? 'Không tìm thấy file, kiểm tra REPORT_SHEET_ID.'
+      ? 'Chưa chia sẻ quyền xem cho Service Account.'
+      : e.code === 404 ? 'Không tìm thấy file, kiểm tra lại ID.'
       : e.message;
-    logger.error('[sheet] đọc lỗi:', msg);
+    logger.error(`[sheet] "${sh.name}" đọc lỗi:`, msg);
     // Giữ dữ liệu cũ nếu có, để một lần hỏng không chặn nhầm cả team
-    _cache = { ..._cache, at: Date.now() - TTL_MS + 60000, error: msg };
+    const keep = prev && prev.rows.length ? prev.rows : [];
+    _cache = { at: Date.now() - TTL_MS + 60000, rows: keep, headers: [],
+               error: msg, name: sh.name, tab: sh.tab, id: sh.id };
+    _caches.set(sh.id, _cache);
     return _cache;
   }
+}
+
+/* Gộp dữ liệu từ mọi file đã khai */
+async function fetchRows(force = false) {
+  if (!SHEETS.length) {
+    return { at: Date.now(), rows: [], sources: [],
+             error: 'Chưa khai file nào trong REPORT_SHEETS' };
+  }
+  const list = await Promise.all(SHEETS.map((sh) => fetchOne(sh, force)));
+  const rows = list.flatMap((c) => c.rows);
+
+  // Chỉ báo lỗi tổng khi TOÀN BỘ file đều hỏng — một file lỗi không chặn cả team
+  const allBad = list.every((c) => c.error);
+  return {
+    at: Math.max(...list.map((c) => c.at)),
+    rows,
+    sources: list.map((c) => ({ name: c.name, tab: c.tab, rows: c.rows.length, error: c.error })),
+    error: allBad ? list.map((c) => `${c.name}: ${c.error}`).join(' · ') : null,
+  };
 }
 
 /* Số dòng của một mã NV trong một ngày */
@@ -157,26 +254,36 @@ async function summarize(days, force = false) {
   for (const r of c.rows) {
     if (!set.has(r.day) || !r.emp_code) continue;
     const k = `${r.emp_code}|${r.day}`;
-    if (!byKey[k]) byKey[k] = { count: 0, amount: 0, approved: 0, rejected: 0 };
+    if (!byKey[k]) byKey[k] = { count: 0, amount: 0, approved: 0, rejected: 0, sources: {} };
     byKey[k].count++;
     byKey[k].amount += r.amount;
+    byKey[k].sources[r.source] = (byKey[k].sources[r.source] || 0) + 1;
     if (/duyệt/i.test(r.result) && !/không/i.test(r.result)) byKey[k].approved++;
     if (/từ chối/i.test(r.result)) byKey[k].rejected++;
   }
-  return { byKey, error: c.error, fetched_at: c.at, total: c.rows.length };
+  return { byKey, error: c.error, fetched_at: c.at, total: c.rows.length, sources: c.sources };
 }
 
 function status() {
+  const list = SHEETS.map((sh) => {
+    const c = _caches.get(sh.id);
+    return {
+      name: sh.name, tab: sh.tab, id_short: sh.id.slice(0, 8) + '…',
+      rows: c ? c.rows.length : 0,
+      error: c ? c.error : 'Chưa đọc lần nào',
+      fetched_at: c ? c.at : null,
+    };
+  });
   return {
-    configured: !!SHEET_ID,
-    sheet_id: SHEET_ID ? SHEET_ID.slice(0, 8) + '…' : null,
-    tab: SHEET_TAB,
-    fetched_at: _cache.at || null,
-    rows: _cache.rows.length,
-    error: _cache.error,
-    has_emp_col: _cache.hasEmpCol !== false,
+    configured: SHEETS.length > 0,
+    count: SHEETS.length,
+    sheets: list,
+    rows: list.reduce((n, x) => n + x.rows, 0),
+    fetched_at: list.length ? Math.max(...list.map((x) => x.fetched_at || 0)) || null : null,
+    error: SHEETS.length === 0 ? 'Chưa khai file nào trong REPORT_SHEETS'
+         : (list.every((x) => x.error) ? 'Không đọc được file nào' : null),
     ttl_min: TTL_MS / 60000,
   };
 }
 
-module.exports = { fetchRows, countFor, summarize, status, parseDay, SHEET_ID, SHEET_TAB };
+module.exports = { fetchRows, countFor, summarize, status, parseDay, parseAmount, SHEETS };
