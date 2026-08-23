@@ -1314,6 +1314,7 @@ function rollCallReport(f = {}, scope = null) {
   const rows = db.prepare(
     `SELECT u.id, u.name user_name, r.department, r.brand,
             COUNT(*) tong,
+            COUNT(DISTINCT r.day) so_ngay,
             SUM(CASE WHEN r.status='done'     THEN 1 ELSE 0 END) da_diem_danh,
             SUM(CASE WHEN r.status='missed'   THEN 1 ELSE 0 END) vang,
             SUM(CASE WHEN r.is_makeup=1       THEN 1 ELSE 0 END) luot_bu,
@@ -1323,12 +1324,20 @@ function rollCallReport(f = {}, scope = null) {
      ${where} GROUP BY u.id, r.department, r.brand
      ORDER BY vang DESC, tong DESC`).all(...p);
 
+  // Trung bình lượt/ngày = tổng lượt (kể cả lượt bù) / số ngày có ít nhất 1 lượt.
+  // So với RC_PER_SHIFT cấu hình chung để quản trị thấy ngay ai bị lệch hẳn
+  // (VD bị bắn tay nhiều lần, hoặc một ngày lên 2 ca).
+  rows.forEach((r) => {
+    r.tb_ngay = r.so_ngay ? Math.round((r.tong / r.so_ngay) * 10) / 10 : 0;
+    r.lech_muc = r.so_ngay ? Math.round(r.tb_ngay) !== RC_PER_SHIFT : false;
+  });
+
   const s = rows.reduce((a, r) => ({
     tong: a.tong + r.tong, done: a.done + r.da_diem_danh,
     missed: a.missed + r.vang, makeup: a.makeup + r.luot_bu,
   }), { tong: 0, done: 0, missed: 0, makeup: 0 });
 
-  return { rows, stats: s };
+  return { rows, stats: s, per_shift: RC_PER_SHIFT };
 }
 
 /* Nhật ký từng lượt điểm danh của một người — dùng cho "Xem lượt" ở tab Điểm danh,
