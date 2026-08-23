@@ -506,7 +506,7 @@ function scheduledFor(user, kind, at = now()) {
 
 function lateOf(kind, diffMin) {
   if (diffMin <= 0) return null;
-  if (kind === 'in')  return diffMin >= 30 ? 'in30' : (diffMin >= 5 ? 'in5' : null);
+  if (kind === 'in')  return diffMin >= 30 ? 'in30' : (diffMin >= 1 ? 'in5' : null);
   if (kind === 'out') return diffMin >= 60 ? 'out60' : null;
   return null;
 }
