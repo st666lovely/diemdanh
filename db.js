@@ -549,14 +549,25 @@ function punch(user, kind, ip, ua) {
     user.id, kind, user.brand, user.department, sched, at,
     Math.max(0, diff), level, ip, (ua || '').slice(0, 400));
 
-  return {
-    ok: true, late_level: level,
-    message: level
-      ? `${PUNCH_KINDS[kind]} lúc ${hhmm} — ${LATE_LEVELS[level].label} (${diff} phút).`
-      : (sched || kind === 'log'
-          ? `${PUNCH_KINDS[kind]} lúc ${hhmm}.`
-          : `${PUNCH_KINDS[kind]} lúc ${hhmm} — hôm nay chưa có lịch ca nên không tính trễ.`),
-  };
+  const gioLich = sched
+    ? new Date(sched).toLocaleTimeString('vi-VN', { hour12: false, timeZone: tz }).slice(0, 5)
+    : null;
+
+  let message;
+  if (level) {
+    message = `${PUNCH_KINDS[kind]} lúc ${hhmm} — ${LATE_LEVELS[level].label} (${diff} phút).`;
+  } else if (!sched) {
+    message = `${PUNCH_KINDS[kind]} lúc ${hhmm} — hôm nay chưa có lịch ca nên không tính trễ.`;
+  } else if (diff > 0) {
+    // Trễ nhưng chưa tới ngưỡng — vẫn ghi rõ, không được nói "đúng giờ"
+    const nguong = kind === 'in' ? 5 : 60;
+    message = `${PUNCH_KINDS[kind]} lúc ${hhmm} — trễ ${diff} phút so với lịch ${gioLich}, `
+            + `chưa tới mức tính (từ ${nguong} phút).`;
+  } else {
+    message = `${PUNCH_KINDS[kind]} lúc ${hhmm} — đúng giờ (lịch ${gioLich}).`;
+  }
+
+  return { ok: true, late_level: level, late_minutes: Math.max(0, diff), scheduled_at: sched, message };
 }
 
 /* Trạng thái ca hôm nay */
@@ -966,6 +977,21 @@ const RC_MAKEUP_MIN  = Math.max(1, Number(process.env.ROLL_CALL_MAKEUP_MIN) || 3
 
 /* Sinh lịch điểm danh cho một ca: N mốc ngẫu nhiên, cách đầu và cuối ca 20 phút,
    và cách nhau tối thiểu 25 phút để không dồn cục. */
+/* Đã xuống ca hôm nay chưa */
+function hasCheckedOut(user) {
+  const st = shiftToday(user);
+  return !!(st.checked_out_at && (!st.checked_in_at || st.checked_out_at > st.checked_in_at));
+}
+
+/* Huỷ các lượt điểm danh còn treo — gọi khi bấm Xuống ca */
+function cancelPendingRollCalls(userId) {
+  const r = db.prepare(
+    "UPDATE roll_calls SET status='cancelled', defer_reason='Đã xuống ca' " +
+    "WHERE user_id=? AND status IN ('pending','waiting')"
+  ).run(userId);
+  return r.changes;
+}
+
 function planRollCalls(user, day, startUtc, endUtc) {
   const existed = db.prepare(
     "SELECT COUNT(*) n FROM roll_calls WHERE user_id=? AND day=? AND is_makeup=0"
@@ -1001,6 +1027,7 @@ function sweepRollCalls() {
 
   const staff = db.prepare("SELECT * FROM users WHERE role='staff' AND is_active=1").all();
   for (const u of staff) {
+    if (hasCheckedOut(u)) continue;                 // đã xuống ca thì không sinh thêm
     const w = shiftWindow(u, t);
     for (const c of w) {
       if (t >= c.start && t <= c.end) planned += planRollCalls(u, c.day, c.start, c.end);
@@ -1011,7 +1038,18 @@ function sweepRollCalls() {
     "SELECT * FROM roll_calls WHERE status='pending' AND deadline_at IS NOT NULL AND deadline_at < ?"
   ).all(t);
 
+  const userOf = db.prepare('SELECT * FROM users WHERE id=?');
+
   for (const rc of due) {
+    const u = userOf.get(rc.user_id);
+
+    // Đã xuống ca trước khi lượt tới hạn -> huỷ, không tính vắng
+    if (u && hasCheckedOut(u)) {
+      db.prepare("UPDATE roll_calls SET status='cancelled', defer_reason='Đã xuống ca' WHERE id=?")
+        .run(rc.id);
+      continue;
+    }
+
     const open = openFor(rc.user_id);
     if (open) {
       // Đang rời vị trí — chuyển sang chờ, bù sau khi bấm Dừng lại
@@ -1065,6 +1103,53 @@ function answerRollCall(user, key, ip) {
   };
 }
 
+/* Bắn điểm danh thủ công ngay lập tức — dùng khi cần kiểm tra đột xuất.
+   Chỉ bắn cho người ĐANG TRONG CA, vì bắn cho người nghỉ là tính vắng oan. */
+function fireRollCall({ who = 'all', windowMin = RC_WINDOW_MIN, scope = null } = {}) {
+  const t = now();
+  let list = db.prepare("SELECT * FROM users WHERE role='staff' AND is_active=1").all();
+
+  if (scope !== null) list = list.filter((u) => u.brand === scope);
+  if (String(who).startsWith('dept:')) {
+    const dep = String(who).slice(5);
+    list = list.filter((u) => u.department === dep);
+  } else if (String(who).startsWith('user:')) {
+    const id = +String(who).slice(5);
+    list = list.filter((u) => u.id === id);
+  }
+
+  const ins = db.prepare(`INSERT INTO roll_calls
+    (user_id,brand,department,day,due_at,deadline_at,status,is_makeup,defer_reason,created_at)
+    VALUES (?,?,?,?,?,?, 'pending', 0, ?, ?)`);
+
+  const fired = [], skipped = [];
+  db.transaction(() => {
+    for (const u of list) {
+      const w = shiftWindow(u, t).filter((c) => t >= c.start && t <= c.end);
+      if (!w.length) { skipped.push(u.name); continue; }        // không trong ca
+      if (hasCheckedOut(u)) { skipped.push(u.name + ' (đã xuống ca)'); continue; }
+      // Đang có lượt chờ rồi thì thôi, khỏi chồng lượt
+      const đangCó = db.prepare(
+        "SELECT 1 FROM roll_calls WHERE user_id=? AND status='pending' AND deadline_at>=?"
+      ).get(u.id, t);
+      if (đangCó) { skipped.push(u.name + ' (đang có lượt chờ)'); continue; }
+
+      ins.run(u.id, u.brand, u.department, w[0].day, t, t + windowMin * 60000,
+              'Quản trị bắn thủ công', t);
+      fired.push(u.name);
+    }
+  })();
+
+  return {
+    ok: fired.length > 0,
+    fired, skipped,
+    message: fired.length
+      ? `Đã bắn cho ${fired.length} người: ${fired.slice(0, 6).join(', ')}`
+        + (fired.length > 6 ? '…' : '') + `. Phải xác nhận trong ${windowMin} phút.`
+      : 'Không có ai đang trong ca theo lịch. Kiểm tra đã nhập lịch ca tháng này chưa.',
+  };
+}
+
 /* Các lượt điểm danh CHƯA tới hạn hoặc ĐANG chờ trả lời.
    Quản trị nhìn vào biết sắp tới lượt ai, khỏi phải ngồi đoán. */
 function upcomingRollCalls(scope = null, limit = 40) {
@@ -1112,7 +1197,8 @@ function rollCallReport(f = {}, scope = null) {
             SUM(CASE WHEN r.status='done'     THEN 1 ELSE 0 END) da_diem_danh,
             SUM(CASE WHEN r.status='missed'   THEN 1 ELSE 0 END) vang,
             SUM(CASE WHEN r.is_makeup=1       THEN 1 ELSE 0 END) luot_bu,
-            SUM(CASE WHEN r.status IN ('pending','waiting') THEN 1 ELSE 0 END) dang_cho
+            SUM(CASE WHEN r.status IN ('pending','waiting') THEN 1 ELSE 0 END) dang_cho,
+            SUM(CASE WHEN r.status='cancelled' THEN 1 ELSE 0 END) da_huy
      FROM roll_calls r JOIN users u ON u.id=r.user_id
      ${where} GROUP BY u.id, r.department, r.brand
      ORDER BY vang DESC, tong DESC`).all(...p);
@@ -1194,6 +1280,9 @@ function pastShiftDays(user, backDays = 14) {
   return rows.map((r) => r.day);
 }
 
+const hasShiftOn = (userId, day) =>
+  !!db.prepare('SELECT 1 FROM shift_days WHERE user_id=? AND day=?').get(userId, day);
+
 function todayOf(user) {
   return dayInTz(now(), tzOf(user.location));
 }
@@ -1234,8 +1323,9 @@ module.exports = {
   setPersonalKey, hasPersonalKey, checkPersonalKey, KEY_RE,
   ensureEmpCode, setEmpCode, backfillEmpCodes,
   isExempt, setExempt, clearExempt, pastShiftDays, todayOf, shiftEndedToday,
+  hasCheckedOut, cancelPendingRollCalls, hasShiftOn,
   REPORT_DEPTS, REPORT_GRACE_MIN, REPORT_BLOCK_AFTER, REPORT_ALERT_AFTER,
-  sweepRollCalls, releaseMakeups, activeRollCall, answerRollCall, rollCallReport, upcomingRollCalls,
+  sweepRollCalls, releaseMakeups, activeRollCall, answerRollCall, rollCallReport, upcomingRollCalls, fireRollCall,
   RC_PER_SHIFT, RC_WINDOW_MIN, RC_MAKEUP_MIN,
   applySchedule, scheduleOf, scheduleSummary,
 };
