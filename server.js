@@ -12,6 +12,7 @@ const bcrypt = require('bcryptjs');
 const cookieSession = require('cookie-session');
 const D = require('./db');
 const { parseScheduleFile } = require('./schedule');
+const Sheets = require('./sheets');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -329,6 +330,94 @@ app.post('/api/admin/users/:id/personal-key', requireUser, requireAdmin, (req, r
   res.status(r.ok ? 200 : 400).json({ ...r, users: D.allUsers(req.scope) });
 });
 
+/* Bảng theo dõi nợ báo cáo */
+app.get('/api/admin/reports', requireUser, requireAdmin, async (req, res) => {
+  D.backfillEmpCodes();
+  const back = Math.min(31, Math.max(3, Number(req.query.days) || 14));
+  const staff = D.allUsers(req.scope).filter((u) => u.role === 'staff' && u.is_active);
+
+  const dayset = new Set();
+  const perUser = [];
+  for (const u of staff) {
+    const full = D.db.prepare('SELECT * FROM users WHERE id=?').get(u.id);
+    const days = D.pastShiftDays(full, back);
+    days.forEach((d) => dayset.add(d));
+    const today = D.todayOf(full);
+    dayset.add(today);
+    perUser.push({ u, full, days, today });
+  }
+
+  const sum = await Sheets.summarize([...dayset], req.query.refresh === '1');
+
+  const rows = perUser.map(({ u, full, days, today }) => {
+    const code = D.ensureEmpCode(full);
+    const cells = [...days].reverse().map((d) => {
+      const hit = sum.byKey[`${code}|${d}`];
+      return {
+        day: d,
+        rows: hit ? hit.count : 0,
+        amount: hit ? hit.amount : 0,
+        exempt: D.isExempt(full.id, d),
+        state: hit ? 'done' : (D.isExempt(full.id, d) ? 'exempt' : 'missing'),
+      };
+    });
+    const owing = cells.filter((c) => c.state === 'missing');
+    const t = sum.byKey[`${code}|${today}`];
+    return {
+      id: u.id, name: u.name, emp_code: code,
+      department: u.department, brand: u.brand,
+      cells, owing: owing.length,
+      owing_days: owing.map((c) => c.day),
+      today_rows: t ? t.count : 0,
+      today_exempt: D.isExempt(full.id, today),
+      blocked: owing.length >= D.REPORT_BLOCK_AFTER,
+      alert: owing.length >= D.REPORT_ALERT_AFTER,
+    };
+  }).sort((a, b) => b.owing - a.owing);
+
+  res.json({
+    rows,
+    days: [...dayset].sort().reverse().slice(0, back),
+    sheet: Sheets.status(),
+    config: {
+      grace_min: D.REPORT_GRACE_MIN,
+      block_after: D.REPORT_BLOCK_AFTER,
+      alert_after: D.REPORT_ALERT_AFTER,
+      depts: D.REPORT_DEPTS,
+    },
+    stats: {
+      total: rows.length,
+      owing: rows.filter((r) => r.owing > 0).length,
+      blocked: rows.filter((r) => r.blocked).length,
+      alert: rows.filter((r) => r.alert).length,
+    },
+    departments: D.DEPTS,
+    brands: req.scope ? [req.scope] : D.BRANDS,
+    users: D.allUsers(req.scope).filter((u) => u.role === 'staff'),
+  });
+});
+
+app.put('/api/admin/users/:id/emp-code', requireUser, requireAdmin, (req, res) => {
+  const u = targetUser(req, res); if (!u) return;
+  const r = D.setEmpCode(u.id, (req.body || {}).emp_code);
+  if (r.ok) D.audit(req.user, 'emp_code_set', `${u.name} -> ${(req.body || {}).emp_code}`, req.ip);
+  res.status(r.ok ? 200 : 400).json({ ...r, users: D.allUsers(req.scope) });
+});
+
+/* Quản trị miễn báo cáo cho một ca */
+app.post('/api/admin/reports/exempt', requireUser, requireAdmin, (req, res) => {
+  const b = req.body || {};
+  const u = D.db.prepare('SELECT * FROM users WHERE id=?').get(+b.user_id);
+  if (!u || !D.inScope(req.scope, u.brand)) {
+    return res.status(404).json({ ok: false, message: 'Không tìm thấy nhân viên trong phạm vi của bạn.' });
+  }
+  const r = b.clear
+    ? D.clearExempt(u.id, String(b.day))
+    : D.setExempt(u.id, String(b.day), String(b.reason || 'Quản trị miễn'), true);
+  D.audit(req.user, b.clear ? 'report_exempt_clear' : 'report_exempt_set', `${u.name} ${b.day}`, req.ip);
+  res.json(r);
+});
+
 /* Báo cáo điểm danh */
 app.get('/api/admin/rollcalls', requireUser, requireAdmin, (req, res) => {
   D.sweepRollCalls();
@@ -362,6 +451,106 @@ app.delete('/api/admin/users/:id', requireUser, requireAdmin, (req, res) => {
   res.json({ ok: true, message: `Đã khóa ${u.name}. Lịch sử vẫn giữ.`, users: D.allUsers(req.scope) });
 });
 
+/* ============================================================
+   TUÂN THỦ BÁO CÁO
+   Có ca trong lịch mà không có dòng nào của mình trong sheet = nợ.
+   Điền vào sheet là tự mở khóa, không cần ai duyệt.
+   ============================================================ */
+
+/* Tình trạng nợ của một nhân viên. force=true thì đọc lại sheet ngay. */
+async function reportStatus(user, force = false) {
+  if (user.role !== 'staff') return { owing: [], today: null, blocked: false, off: true };
+  if (!D.REPORT_DEPTS.includes(String(user.department || '').toUpperCase())) {
+    return { owing: [], today: null, blocked: false, off: true, reason: 'Bộ phận này không phải nộp' };
+  }
+
+  const code = D.ensureEmpCode(user);
+  const today = D.todayOf(user);
+  const days = D.pastShiftDays(user, 14);
+
+  const sum = await Sheets.summarize([...days, today], force);
+
+  // Sheet hỏng thì KHÔNG chặn ai — thà bỏ sót còn hơn khóa nhầm cả team
+  if (sum.error && !sum.total) {
+    return { owing: [], today: null, blocked: false, sheet_error: sum.error, emp_code: code };
+  }
+
+  const owing = days.filter((d) => !sum.byKey[`${code}|${d}`] && !D.isExempt(user.id, d));
+  const t = sum.byKey[`${code}|${today}`] || null;
+
+  return {
+    emp_code: code,
+    owing,
+    blocked: owing.length >= D.REPORT_BLOCK_AFTER,
+    alert: owing.length >= D.REPORT_ALERT_AFTER,
+    today: {
+      day: today,
+      rows: t ? t.count : 0,
+      amount: t ? t.amount : 0,
+      approved: t ? t.approved : 0,
+      rejected: t ? t.rejected : 0,
+      exempt: D.isExempt(user.id, today),
+      shift_ended: D.shiftEndedToday(user),
+    },
+    fetched_at: sum.fetched_at,
+    sheet_error: sum.error || null,
+  };
+}
+
+/* Chốt chặn:
+   - Xuống ca: hôm nay chưa có dòng nào thì không cho bấm
+   - Lên ca:   còn nợ ca cũ thì không cho vào ca mới */
+async function reportGate(req, res, kind) {
+  const st = await reportStatus(req.user);
+  if (st.off || st.sheet_error) return null;
+
+  if (kind === 'out' && st.today && st.today.rows === 0 && !st.today.exempt) {
+    return {
+      ok: false, report_required: true, report: st,
+      message: `Chưa có dòng nào của ${st.emp_code} trong sheet hôm nay. `
+             + 'Điền báo cáo rồi bấm "Tôi đã điền rồi". Ca không phát sinh việc thì bấm "Ca không phát sinh".',
+    };
+  }
+
+  if (kind === 'in' && st.blocked) {
+    const ds = st.owing.map((d) => d.split('-').reverse().join('/'));
+    return {
+      ok: false, report_required: true, report: st,
+      message: `Còn nợ báo cáo ${st.owing.length} ca: ${ds.slice(0, 5).join(', ')}`
+             + (ds.length > 5 ? '…' : '') + '. Điền bù xong mới vào ca mới được.',
+    };
+  }
+  return null;
+}
+
+app.get('/api/report/status', requireUser, async (req, res) => {
+  res.json(await reportStatus(req.user, req.query.refresh === '1'));
+});
+
+/* Nút "Tôi đã điền rồi" — đọc lại sheet ngay, không chờ tới lượt quét */
+app.post('/api/report/recheck', requireUser, async (req, res) => {
+  const st = await reportStatus(req.user, true);
+  res.json({
+    ok: true, report: st,
+    message: st.sheet_error ? 'Không đọc được sheet: ' + st.sheet_error
+      : st.today && st.today.rows > 0
+        ? `Đã thấy ${st.today.rows} dòng của bạn hôm nay.`
+        : 'Vẫn chưa thấy dòng nào của bạn. Kiểm tra cột Ngày và cột MaNV đã điền đúng chưa.',
+  });
+});
+
+/* Ca không phát sinh việc — vẫn phải khai, để phân biệt với quên điền */
+app.post('/api/report/no-activity', requireUser, (req, res) => {
+  const day = D.todayOf(req.user);
+  const reason = String((req.body || {}).reason || '').trim();
+  if (reason.length < 10) {
+    return res.status(400).json({ ok: false, message: 'Ghi rõ lý do ít nhất 10 ký tự.' });
+  }
+  const r = D.setExempt(req.user.id, day, reason, false);
+  D.audit(req.user, 'report_no_activity', `${day}: ${reason}`, req.ip);
+  res.json(r);
+});
+
 /* --- Điểm danh ngẫu nhiên --- */
 app.post('/api/rollcall/answer', requireUser, (req, res) => {
   const r = D.answerRollCall(req.user, (req.body || {}).key, req.ip);
@@ -373,8 +562,20 @@ app.post('/api/rollcall/answer', requireUser, (req, res) => {
    ============================================================ */
 
 /* --- Nhân viên bấm Lên ca / Xuống ca / Chấm công --- */
-app.post('/api/punch', requireUser, requireKey, (req, res) => {
-  const r = D.punch(req.user, String((req.body || {}).kind || ''), req.ip, req.get('user-agent'));
+app.post('/api/punch', requireUser, requireKey, async (req, res) => {
+  const kind = String((req.body || {}).kind || '');
+
+  // Chốt tuân thủ báo cáo — chỉ áp cho lên ca và xuống ca
+  if (kind === 'in' || kind === 'out') {
+    try {
+      const blocked = await reportGate(req, res, kind);
+      if (blocked) return res.status(409).json({ ...blocked, shift: D.shiftToday(req.user) });
+    } catch (e) {
+      console.error('reportGate lỗi, cho qua:', e.message);   // lỗi sheet không được chặn người làm
+    }
+  }
+
+  const r = D.punch(req.user, kind, req.ip, req.get('user-agent'));
   res.status(r.ok ? 200 : 400).json({ ...r, shift: D.shiftToday(req.user) });
 });
 
