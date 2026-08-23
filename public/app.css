@@ -205,6 +205,9 @@ body.alarming::after{
 
 /* ===== Chấm công ca: Lên ca / Xuống ca / Chấm công ===== */
 .punch{display:grid;grid-template-columns:repeat(3,1fr);gap:9px;padding:12px 14px 14px}
+.punch.two{grid-template-columns:repeat(2,1fr)}
+.pbtn:disabled{opacity:.4;cursor:not-allowed}
+.pbtn:disabled:hover{background:#fff;border-color:var(--line)}
 .pbtn{padding:14px 8px;border-radius:12px;border:1.5px solid var(--line);background:#fff;
   font-weight:700;font-size:14.5px;transition:background .15s,border-color .15s;min-height:72px;
   display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px}
@@ -352,11 +355,13 @@ td.wide,th.wide{width:100%;white-space:normal}
 .shrow .sub{font-size:12.5px}
 
 /* ===== Lưới theo dõi báo cáo ===== */
-.grid14{display:flex;gap:3px;flex-wrap:wrap;max-width:340px}
-.gcell{width:14px;height:18px;border-radius:3px;display:inline-block;flex:none}
-.gcell.ok{background:var(--pri)}
-.gcell.ex{background:#D7DEDB;border:1px solid var(--line2)}
-.gcell.miss{background:var(--red)}
+.grid14{display:flex;gap:4px;flex-wrap:wrap;max-width:400px}
+.gcell{width:26px;height:26px;border-radius:6px;flex:none;display:flex;align-items:center;
+  justify-content:center;font-size:11px;font-weight:700;font-style:normal;line-height:1}
+.gcell b{font-weight:700}
+.gcell.ok{background:var(--pri);color:#fff}
+.gcell.ex{background:#EDF0EE;color:var(--tx3);border:1px solid var(--line2)}
+.gcell.miss{background:var(--red);color:#fff}
 .legend{display:flex;gap:14px;align-items:center;font-size:12.5px;color:var(--tx3);margin-left:auto}
 .legend span{display:inline-flex;align-items:center;gap:6px}
 tr.row-alert{background:var(--red-s)}
