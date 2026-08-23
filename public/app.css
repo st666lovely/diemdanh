@@ -362,6 +362,7 @@ td.wide,th.wide{width:100%;white-space:normal}
 .gcell.ok{background:var(--pri);color:#fff}
 .gcell.ex{background:#EDF0EE;color:var(--tx3);border:1px solid var(--line2)}
 .gcell.miss{background:var(--red);color:#fff}
+.gcell.today{box-shadow:0 0 0 2px var(--amb)}
 .legend{display:flex;gap:14px;align-items:center;font-size:12.5px;color:var(--tx3);margin-left:auto}
 .legend span{display:inline-flex;align-items:center;gap:6px}
 tr.row-alert{background:var(--red-s)}
