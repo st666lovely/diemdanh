@@ -419,7 +419,7 @@ const PUNCH_KINDS = { in: 'Lên ca', out: 'Xuống ca', log: 'Chấm công (đã
 const PUNCH_ACTIVE = ['in', 'out'];
 
 const LATE_LEVELS = {
-  in5:   { label: 'Trễ lên ca ~5p',    kind: 'in',  min: 5 },
+  in5:   { label: 'Trễ lên ca ~1p',    kind: 'in',  min: 1 },
   in30:  { label: 'Trễ lên ca ~30p',   kind: 'in',  min: 30 },
   out60: { label: 'Trễ xuống ca ~60p', kind: 'out', min: 60 },
 };
