@@ -6,11 +6,11 @@ tách riêng theo brand AE và ST.
 ## Vào ca — nhân viên KHÔNG cần đăng nhập
 
 Quản lý thêm nhân viên ở trang `/admin`, bấm **Chép link**, gửi cho từng người một lần.
-Link kiểu `https://.../k/RYH8UTCL`. Mở lần đầu là link gắn luôn với thiết bị đó;
-từ đó lưu vào màn hình chính điện thoại, mở ra là vào thẳng.
+Link kiểu `https://.../k/RYH8UTCL`. Lưu vào màn hình chính là mở ra vào thẳng.
 
-Mở cùng link trên máy khác sẽ bị chặn và ghi vào nhật ký — đây là cơ chế chống bấm hộ.
-Nhân viên đổi máy thì quản lý bấm **Gỡ máy**; nghi bị lộ link thì bấm **Cấp key mới**.
+Link **không gắn với thiết bị nào** — mở được ở bất kỳ máy nào, kể cả máy dùng chung
+nhiều người. Việc xác định ai đang thao tác do **mã cá nhân** đảm nhiệm, vì mã mới là
+thứ không đưa cho nhau được. Nghi link bị lộ thì bấm **Cấp key mới**, link cũ chết ngay.
 
 Chỉ quản trị mới đăng nhập bằng tài khoản + mật khẩu.
 
@@ -43,12 +43,7 @@ Sau đó vào tab **Quản trị viên** để tạo tài khoản cho từng bra
 
 Cài xong có icon riêng, mở lên chạy toàn màn hình, không thanh địa chỉ.
 
-**Dặn nhân viên: cài lên màn hình chính TRƯỚC khi bấm chấm công lần đầu.**
-Link gắn cứng vào thiết bị ở lần bấm đầu tiên, không phải lần mở trang. Trên iPhone,
-app ở màn hình chính dùng kho cookie riêng với Safari nên bị coi là thiết bị khác —
-bấm trong Safari trước rồi mới cài thì app sẽ bị chặn, phải nhờ quản lý bấm *Gỡ máy*.
-
-Trang có sẵn thẻ nhắc việc này, tự ẩn khi đã cài xong.
+Trang có sẵn thẻ nhắc cài đặt, tự ẩn khi đã cài xong.
 
 ## Chạy trên máy
 
@@ -72,11 +67,15 @@ phải sẵn sàng 24/7, đặc biệt là ca đêm.
 
 ## Mã cá nhân & điểm danh
 
-**Mã cá nhân** lấy từ lương tháng trước, dạng 5 chữ số: chữ số hàng trăm nghìn + 4 số cuối.
-Lương 42.560.000 thì mã là `52560`. Chọn con số này vì không ai đưa lương của mình cho
-đồng nghiệp, nên nó chặn được việc bấm hộ.
+**Mã cá nhân** do quản lý tự đặt cho từng người: 4–32 ký tự, không khoảng trắng, chữ số
+ký hiệu đều được. Ví dụ `x2560`, `52560`, `HA-0825`.
 
-Quản lý đặt mã cho từng người ở tab **Nhân sự**. Hệ thống **chỉ lưu bản băm bcrypt**,
+Cách đặt phổ biến là lấy từ lương tháng trước, vì không ai đưa lương của mình cho đồng
+nghiệp — đó là thứ chặn được việc bấm hộ. Nhưng nội dung mã là việc của quản lý,
+hệ thống không ép theo quy tắc nào.
+
+Đặt mã bằng một trong hai cách: nút **Đặt mã** ở tab Nhân sự cho từng người, hoặc thêm cột
+`MaCaNhan` vào file lịch tháng — mỗi tháng nhập lịch một lần là đổi mã luôn. Hệ thống **chỉ lưu bản băm bcrypt**,
 không lưu và không trả về số gốc ở bất kỳ API nào. Người chưa đặt mã thì chưa bị chặn,
 để không kẹt lúc mới triển khai.
 
@@ -89,6 +88,20 @@ bằng mã cá nhân trong `ROLL_CALL_WINDOW_MIN` phút, quá hạn tính vắng
 **Đang rời vị trí thì không tính vắng.** Lượt rơi đúng lúc nhân viên đang đi vệ sinh hay
 lấy đồ sẽ được hoãn, hệ thống ghi nhận lý do và tạo sẵn một lượt bù. Bấm Dừng lại xong
 `ROLL_CALL_MAKEUP_MIN` phút thì lượt bù hiện lên. Không bấm Dừng mà bỏ lỡ thì vẫn tính vắng.
+
+### Cách tính trễ
+
+Nhân viên phải lên ca **trước giờ ca `SHIFT_EARLY_MIN` phút**. Mốc chuẩn = giờ ca − 10 phút.
+
+Ca 17:30 thì mốc là **17:20**. Bấm lúc 17:21 là trễ 1 phút, đã tính là trễ.
+
+| Mức | Điều kiện |
+|---|---|
+| Trễ lên ca ~1p | Quá mốc từ 1 phút |
+| Trễ lên ca ~30p | Quá mốc từ 30 phút |
+| Trễ xuống ca ~60p | Quá giờ tan ca từ 60 phút |
+
+Cột **Theo lịch** trong bảng hiện mốc đã trừ sẵn, không phải giờ ca.
 
 ### Âm báo
 
@@ -114,25 +127,115 @@ App cũng giữ màn hình không tắt trong ca (Screen Wake Lock) — màn t�
 
 Xem số liệu ở tab **Điểm danh**: tổng lượt, đã điểm danh, vắng, lượt bù, tỉ lệ theo từng người.
 
+## Tuân thủ báo cáo
+
+Trạm trực đọc thẳng **Google Sheets báo cáo duyệt rút / duyệt khuyến mãi** qua Service Account.
+Không có form báo cáo riêng — nội dung chính là dữ liệu thật đã có cấu trúc, nên không gõ bừa được.
+
+**Cách nhận biết ai chưa điền:** có ca trong lịch mà **không file nào** có dòng mang **Mã NV**
+của người đó trong ngày đó = nợ.
+
+Khai nhiều file trong biến `REPORT_SHEETS`, mỗi dòng một file:
+
+```
+Chứng từ USDT|19KQ7pC0bkzhIiMEy2BTsMWEFumWPF-37QsepFWH1viI|Nhập liệu
+Xử lý gian lận|1AbCdEf...|Nhập liệu
+Duyệt rút & KM|1XyZ123...|Nhập liệu
+```
+
+Dạng `Tên hiển thị | spreadsheetId | Tên tab`. Mỗi ngày RISK chỉ phát sinh một hai loại việc
+chứ không phải cả ba, nên **có dòng ở bất kỳ file nào là đủ**.
+
+Một file lỗi thì các file còn lại vẫn đọc bình thường. Chỉ khi **mọi file đều lỗi** hệ thống
+mới bỏ qua hoàn toàn và không chặn ai.
+
+Mã NV (`CS01`, `RSK03`…) do Trạm trực sinh sẵn, xem và sửa ở tab Nhân sự. Thêm cột `MaNV`
+vào **cả ba file** và điền mã này ở mỗi dòng.
+
+Tên cột nhận diện linh hoạt: cột nào bắt đầu bằng `Ngày` đều tính là cột ngày
+(`Ngày`, `Ngày phát hiện`, `Ngày xử lý`), tương tự với `Số tiền`, `Loại`, `Người xử lý`.
+Số tiền đọc được cả `1.266.000` kiểu Việt Nam lẫn `1,266,000` kiểu Anh.
+
+> **Không dùng mã cá nhân làm cột trong sheet.** Sheet cả team cùng xem, để mã cá nhân vào
+> là lộ ngay và mất luôn tác dụng chống bấm hộ. Mã NV thì lộ ra cũng không mở được gì.
+
+**Ba nấc chặn**
+
+1. **Không bấm được Xuống ca** khi hôm nay chưa có dòng nào. Bỏ về luôn thì hệ thống ghi
+   chưa xuống ca, tự thành trễ xuống ca 60 phút và vào danh sách trễ.
+2. **Không bấm được Lên ca** khi còn nợ từ `REPORT_BLOCK_AFTER` ca. Màn hình ghi rõ nợ ngày nào.
+3. **Cảnh báo khóa BO** khi nợ từ `REPORT_ALERT_AFTER` ca — hiện đỏ ở tab Báo cáo.
+
+**Tự mở khóa.** Điền vào sheet rồi bấm "Tôi đã điền rồi" là hệ thống đọc lại ngay, thấy dòng
+là mở trong vài giây. Không chờ ai duyệt.
+
+**Ca không phát sinh việc** thì bấm "Ca không phát sinh" và ghi lý do tối thiểu 10 ký tự —
+để phân biệt ca trống với quên điền. Quản trị cũng miễn được từng ca ở tab Báo cáo.
+
+**Sheet lỗi thì không chặn ai.** Mất mạng hay hết quyền đọc thì hệ thống cho qua hết,
+vì thà bỏ sót vài ca còn hơn khóa nhầm cả team giữa giờ làm.
+
+**Theo dõi ở tab Báo cáo:** lưới ô vuông mỗi người mỗi ca — xanh là đã điền, xám là được miễn,
+đỏ là chưa điền. Nhìn lướt thấy ngay ai có vệt đỏ. Kèm số ca nợ và trạng thái chặn.
+
+### Cấu hình
+
+Cần ba biến môi trường: `REPORT_SHEETS`, `GOOGLE_SERVICE_ACCOUNT_EMAIL`, `GOOGLE_PRIVATE_KEY`.
+
+Nhớ chia sẻ **cả ba file** cho Service Account, không chỉ một file.
+
+Hai biến Google lấy từ file JSON key của Service Account — dùng lại được key của bot báo cáo
+đang chạy. Sau đó vào file Sheets bấm **Chia sẻ**, dán email Service Account, chọn **Người xem**.
+Không cần quyền sửa vì chỉ đọc.
+
 ## Lịch ca theo tháng
 
 Ca thay đổi từng ngày nên không dùng một khung giờ cố định. Quản trị nhập file Excel/CSV
 ở tab **Nhân sự**, một dòng một người, mỗi ngày trong tháng một cột:
 
-| Ma | Ten | KhuVuc | BoPhan | Brand | 1 | 2 | … | 14 | 15 | … |
-|---|---|---|---|---|---|---|---|---|---|---|
-| 9F2K7QX3 | Nguyễn Thu Hà | VN | CS | AE | 08:00-16:00 | 08:00-16:00 | … | OFF | OFF | … |
+| Ma | Ten | KhuVuc | BoPhan | Brand | MaCaNhan | ThangLuong | 1 | 2 | … | 14 | 15 | … |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 9F2K7QX3 | Nguyễn Thu Hà | VN | CS | AE | 52560 | 2026-07 | 08:00-16:00 | 08:00-16:00 | … | OFF | OFF | … |
 
 - **Ma** là mã 8 ký tự trong link vào ca. Không có cột này thì khớp theo **Ten** (phải trùng khớp tuyệt đối).
-- Ô ghi `HH:mm-HH:mm` (chấp nhận `12h00-22h00`); để trống hoặc `OFF` / `Nghỉ` = ngày nghỉ.
-- Ca qua đêm (`22:00-06:00`) tự hiểu là kết thúc vào ngày hôm sau.
+- Ô ghi được **hai kiểu**: đủ giờ vào–kết ca `HH:mm-HH:mm` (chấp nhận `12h00-22h00`), hoặc **chỉ một mốc giờ**
+  vào ca như `07:00` — hệ thống tự suy giờ kết ca theo **Ca mặc định** của người đó (xem bên dưới).
+  Để trống hoặc `OFF` / `Nghỉ` = ngày nghỉ.
+- Ca qua đêm (`22:00-06:00`, hay `22:00` với ca mặc định 10 tiếng) tự hiểu là kết thúc vào ngày hôm sau.
 - Ngày không có lịch thì bấm chấm công vẫn ghi nhận nhưng **không tính trễ**.
+- **MaCaNhan** do quản lý tự đặt (4–32 ký tự, không khoảng trắng), **ThangLuong** dạng `2026-07`.
+  Để trống hai cột này thì giữ nguyên mã cũ. Hệ thống băm ngay khi nhận, không lưu bản gốc.
+  **Định dạng cột MaCaNhan thành Text trong Excel**, nếu không Excel cắt mất số 0 đầu.
+
+### Chỉ ghi một mốc giờ vào ca
+
+Nhiều nơi lịch chính chỉ ghi giờ vào ca — nhân viên tự hiểu mình là nhân viên 8 tiếng hay 10 tiếng.
+Trạm trực hỗ trợ đúng kiểu này: ô lịch chỉ cần ghi `07:00` (không cần gạch nối), hệ thống tự cộng thêm
+số giờ ca mặc định của người đó để ra giờ kết ca — không cần gõ đủ khung giờ cho từng người từng ngày.
+
+Số giờ ca mặc định (**Ca mặc định**, ví dụ 8 hoặc 10 tiếng) đặt cố định cho từng người ở tab **Nhân sự**,
+đổi được bất cứ lúc nào qua cột "Ca mặc định". Người mới thêm mặc định 8 tiếng.
+
+Hai kiểu ghi dùng chung được trong cùng một file, tuỳ ngày: ngày nào cần khung giờ riêng (VD ca nửa buổi,
+tăng ca có kế hoạch) thì vẫn ghi đủ `HH:mm-HH:mm` như cũ; ngày nào theo ca chuẩn thì chỉ cần ghi một mốc giờ.
+
+Màn **Xem trước** báo trước số ô sẽ được tự suy giờ kết ca trước khi Merge/Ghi đè, để kiểm tra lại nếu cần.
 
 Ba nút: **Xem trước** (đối chiếu, chưa ghi gì), **Merge** (chỉ đụng người có trong file),
 **Ghi đè tháng** (xoá sạch lịch tháng đó của mọi người rồi ghi lại).
 
 Cùng định dạng với bot điểm danh Telegram, chỉ khác cột định danh: bot dùng `TelegramID`,
 ở đây dùng `Ma`. Thêm một cột là dùng chung được một file cho cả hai.
+
+## OT đột xuất
+
+Khi một người được yêu cầu OT ngoài kế hoạch (không nằm trong lịch tháng đã nhập), quản trị gán ở tab **OT**:
+chọn nhân viên, chọn ngày, ghi chú lý do (tuỳ chọn), bấm **Gán OT**. Xem lại/bỏ theo tháng ngay trong tab đó.
+
+- **Chỉ quản trị gán được** — nhân viên không tự bấm, tránh khai khống.
+- **Thuần ghi nhận để theo dõi** — OT không cộng thêm giờ vào ca chính, không đổi giờ tan ca, không ảnh hưởng
+  cách tính trễ lên/xuống ca. Muốn đổi giờ ca thật sự thì sửa trực tiếp trong lịch tháng (tab Nhân sự).
+- Nhân viên thấy nhãn "⚡ OT hôm nay" trên trang của mình vào đúng ngày được gán, kèm ghi chú nếu có.
 
 ## Nghỉ phép: nguyện vọng và lịch chính thức
 
@@ -208,9 +311,21 @@ Quét chạy mỗi lần đọc trạng thái, thêm một vòng nền mỗi ph�
 | `ADMIN_PASSWORD` | — | Chỉ dùng lần khởi tạo đầu tiên |
 | `MAX_OFF_PER_MONTH` | 15 | Số ngày off tối đa mỗi nhân viên trong một tháng |
 | `MAX_OFF_PER_DAY_DEPT` | 1 | Số người cùng bộ phận được nghỉ trong cùng một ngày |
+| `SHIFT_EARLY_MIN` | 10 | Phải lên ca trước giờ ca bấy nhiêu phút |
+| `LATE_IN_MIN1` | 1 | Quá mốc từ bấy nhiêu phút là trễ nhẹ |
+| `LATE_IN_MIN2` | 30 | Ngưỡng trễ nặng |
+| `LATE_OUT_MIN` | 60 | Ngưỡng trễ xuống ca |
 | `ROLL_CALLS_PER_SHIFT` | 4 | Số lượt điểm danh ngẫu nhiên mỗi ca |
 | `ROLL_CALL_WINDOW_MIN` | 5 | Số phút được phép xác nhận trước khi tính vắng |
 | `ROLL_CALL_MAKEUP_MIN` | 3 | Sau khi dừng hoạt động bao lâu thì bắn lượt bù |
+| `REPORT_SHEETS` | — | Danh sách file, mỗi dòng `Tên \| ID \| Tab` |
+| `REPORT_SHEET_TTL_MIN` | 10 | Bao lâu đọc lại sheet một lần |
+| `REPORT_BLOCK_AFTER` | 1 | Nợ mấy ca thì chặn vào ca mới |
+| `REPORT_ALERT_AFTER` | 3 | Nợ mấy ca thì cảnh báo khóa BO |
+| `REPORT_GRACE_MIN` | 60 | Sau giờ tan ca bao lâu mới tính là nợ |
+| `REPORT_DEPTS` | cả 5 | Bộ phận phải nộp báo cáo |
+| `GOOGLE_SERVICE_ACCOUNT_EMAIL` | — | Email Service Account |
+| `GOOGLE_PRIVATE_KEY` | — | Private key từ file JSON |
 
 ## Sao lưu
 
