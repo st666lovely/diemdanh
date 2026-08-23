@@ -37,3 +37,20 @@ services:
         value: "5"            # số phút được phép xác nhận
       - key: ROLL_CALL_MAKEUP_MIN
         value: "3"            # sau khi dừng hoạt động bao lâu thì bắn lượt bù
+      # ── Tuân thủ báo cáo: đọc Google Sheets duyệt rút / duyệt khuyến mãi ──
+      - key: REPORT_SHEET_ID
+        value: 19KQ7pC0bkzhIiMEy2BTsMWEFumWPF-37QsepFWH1viI
+      - key: REPORT_SHEET_TAB
+        value: Nhập liệu
+      - key: REPORT_SHEET_TTL_MIN
+        value: "10"           # bao lâu đọc lại sheet một lần
+      - key: REPORT_BLOCK_AFTER
+        value: "1"            # nợ mấy ca thì chặn vào ca mới
+      - key: REPORT_ALERT_AFTER
+        value: "3"            # nợ mấy ca thì cảnh báo khóa BO
+      - key: REPORT_GRACE_MIN
+        value: "60"           # sau giờ tan ca bao lâu mới tính là nợ
+      - key: GOOGLE_SERVICE_ACCOUNT_EMAIL
+        sync: false           # lấy từ file JSON key, điền trong Dashboard
+      - key: GOOGLE_PRIVATE_KEY
+        sync: false           # dán nguyên chuỗi -----BEGIN PRIVATE KEY-----...
