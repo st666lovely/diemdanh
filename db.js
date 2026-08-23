@@ -413,7 +413,10 @@ function history(f = {}, scope = null) {
 /* ============================================================
    CHẤM CÔNG CA — Lên ca / Xuống ca / Chấm công
    ============================================================ */
-const PUNCH_KINDS = { in: 'Lên ca', out: 'Xuống ca', log: 'Chấm công' };
+// 'log' giữ lại để đọc bản ghi cũ, nhưng không cho bấm mới nữa —
+// việc xác nhận có mặt giữa ca đã do điểm danh ngẫu nhiên đảm nhiệm.
+const PUNCH_KINDS = { in: 'Lên ca', out: 'Xuống ca', log: 'Chấm công (đã bỏ)' };
+const PUNCH_ACTIVE = ['in', 'out'];
 
 const LATE_LEVELS = {
   in5:   { label: 'Trễ lên ca ~5p',    kind: 'in',  min: 5 },
@@ -509,7 +512,29 @@ function lateOf(kind, diffMin) {
 }
 
 function punch(user, kind, ip, ua) {
-  if (!PUNCH_KINDS[kind]) return { ok: false, message: 'Loại chấm công không hợp lệ.' };
+  if (!PUNCH_ACTIVE.includes(kind)) return { ok: false, message: 'Loại chấm công không hợp lệ.' };
+
+  const st = shiftToday(user);
+
+  // Bấm nhầm Xuống ca khi chưa lên ca
+  if (kind === 'out' && !st.on_shift) {
+    return {
+      ok: false, not_on_shift: true,
+      message: st.checked_out_at
+        ? `Bạn đã xuống ca lúc ${new Date(st.checked_out_at).toLocaleTimeString('vi-VN',
+            { hour12: false, timeZone: tzOf(user.location) })} rồi.`
+        : 'Bạn chưa lên ca.',
+    };
+  }
+
+  // Bấm Lên ca hai lần liên tiếp
+  if (kind === 'in' && st.on_shift) {
+    return {
+      ok: false, already_in: true,
+      message: `Bạn đã lên ca lúc ${new Date(st.checked_in_at).toLocaleTimeString('vi-VN',
+        { hour12: false, timeZone: tzOf(user.location) })} rồi.`,
+    };
+  }
 
   const at = now();
   const tz = tzOf(user.location);
@@ -1040,6 +1065,36 @@ function answerRollCall(user, key, ip) {
   };
 }
 
+/* Các lượt điểm danh CHƯA tới hạn hoặc ĐANG chờ trả lời.
+   Quản trị nhìn vào biết sắp tới lượt ai, khỏi phải ngồi đoán. */
+function upcomingRollCalls(scope = null, limit = 40) {
+  const t = now();
+  const rows = db.prepare(
+    `SELECT r.*, u.name user_name, u.emp_code
+     FROM roll_calls r JOIN users u ON u.id=r.user_id
+     WHERE r.status IN ('pending','waiting')
+       AND (? IS NULL OR r.brand=?)
+     ORDER BY (r.due_at IS NULL), r.due_at
+     LIMIT ?`
+  ).all(scope, scope, limit);
+
+  return rows.map((r) => {
+    let state = 'scheduled';                       // còn lâu mới tới
+    if (r.status === 'waiting') state = 'waiting'; // chờ nhân viên bấm Dừng lại
+    else if (r.due_at && t >= r.due_at && t <= r.deadline_at) state = 'active';   // đang phải trả lời
+    else if (r.due_at && t < r.due_at && r.due_at - t <= 10 * 60000) state = 'soon'; // sắp tới trong 10 phút
+
+    return {
+      id: r.id, user_id: r.user_id, user_name: r.user_name, emp_code: r.emp_code,
+      department: r.department, brand: r.brand, day: r.day,
+      due_at: r.due_at, deadline_at: r.deadline_at,
+      is_makeup: !!r.is_makeup, defer_reason: r.defer_reason,
+      state,
+      in_seconds: r.due_at ? Math.round((r.due_at - t) / 1000) : null,
+    };
+  });
+}
+
 /* Thống kê điểm danh cho quản trị */
 function rollCallReport(f = {}, scope = null) {
   const w = [], p = [];
@@ -1171,7 +1226,7 @@ module.exports = {
   db, DEPTS, BRANDS, AUTO_CLOSE_GRACE_MIN, newKey,
   types, typeByCode, sweepStale, openFor, holderOf, lanes, present,
   startActivity, stopActivity, stateFor, history, allUsers, audit, lockKey,
-  PUNCH_KINDS, LATE_LEVELS, MAX_OFF_PER_MONTH,
+  PUNCH_KINDS, PUNCH_ACTIVE, LATE_LEVELS, MAX_OFF_PER_MONTH,
   punch, shiftToday, punchHistory, lateByUser, scheduledFor,
   myOffs, toggleOff, offSummary, setLock, isLocked, whoOff, MAX_OFF_PER_DAY_DEPT,
   LOCATIONS, LOCATION_TZ, tzOf, zonedToUtc, dayInTz, shiftWindow,
@@ -1180,7 +1235,7 @@ module.exports = {
   ensureEmpCode, setEmpCode, backfillEmpCodes,
   isExempt, setExempt, clearExempt, pastShiftDays, todayOf, shiftEndedToday,
   REPORT_DEPTS, REPORT_GRACE_MIN, REPORT_BLOCK_AFTER, REPORT_ALERT_AFTER,
-  sweepRollCalls, releaseMakeups, activeRollCall, answerRollCall, rollCallReport,
+  sweepRollCalls, releaseMakeups, activeRollCall, answerRollCall, rollCallReport, upcomingRollCalls,
   RC_PER_SHIFT, RC_WINDOW_MIN, RC_MAKEUP_MIN,
   applySchedule, scheduleOf, scheduleSummary,
 };
