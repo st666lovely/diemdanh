@@ -262,6 +262,7 @@ async function punch(kind) {
   if (r.key_required) { toast('Mã cá nhân', r.message, false); return; }
   if (r.report_required) {
     if (r.report) REP = r.report;
+    repBlocked = true;              // từ giờ mới hiện thẻ nhắc
     toast('Chưa nộp báo cáo', r.message, false);
     render();
     return;
@@ -519,14 +520,19 @@ async function answerRollCall() {
   await load();
 }
 
-/* Thẻ nợ báo cáo — hiện khi còn ca chưa điền hoặc hôm nay chưa có dòng nào */
+/* Thẻ nợ báo cáo.
+   Nhắc "hôm nay chưa có dòng nào" chỉ hiện KHI SẮP/ĐÃ HẾT CA hoặc khi vừa bị
+   chặn lúc bấm Xuống ca — không hiện ngay đầu ca, vì đầu ca chưa làm gì thì
+   chưa có gì để báo cáo. Còn nợ ca CŨ thì hiện luôn, vì cái đó chặn Lên ca. */
 let REP = null;
+let repBlocked = false;      // bật khi bấm Xuống ca mà bị chặn
 
 function reportCard() {
   if (!REP || REP.off || REP.sheet_error) return '';
   const t = REP.today;
-  const noHomNay = t && t.rows === 0 && !t.exempt;
-  if (!REP.owing.length && !noHomNay) {
+  const chưaĐiền = t && t.rows === 0 && !t.exempt;
+  const đếnLúcNhắc = chưaĐiền && (repBlocked || (t && t.shift_ended));
+  if (!REP.owing.length && !đếnLúcNhắc) {
     if (!t || !t.rows) return '';
     const chiTiet = Object.entries(t.sources || {})
       .map(([k, v]) => `${k}: ${v}`).join(' · ');
@@ -538,6 +544,7 @@ function reportCard() {
   }
 
   const nợ = REP.owing.map(d => d.split('-').reverse().slice(0, 2).join('/'));
+  const noHomNay = chưaĐiền;
   return `<div class="card rep">
     <div class="ic">!</div>
     <div class="m">
@@ -546,7 +553,7 @@ function reportCard() {
         ? `Ngày ${nợ.slice(0, 6).join(', ')}${nợ.length > 6 ? '…' : ''}. Còn nợ thì không vào ca mới được.`
         : `Chưa có dòng nào mang mã <b>${REP.emp_code}</b> hôm nay ở bất kỳ file nào.`
           + ((REP.sheets || []).length ? `<br>Các file: ${REP.sheets.map(x => x.name).join(', ')}.` : '')
-          + ' Điền một file bất kỳ rồi bấm "Tôi đã điền rồi".'}</div>
+          + ' Bổ sung dữ liệu báo cáo và bấm "Tôi đã điền rồi".'}</div>
       <div class="acts2">
         <button class="btn btn-sm" onclick="recheckReport()">Tôi đã điền rồi</button>
         ${noHomNay ? '<button class="btn btn-sm" onclick="noActivity()">Ca không phát sinh</button>' : ''}
@@ -567,6 +574,7 @@ async function recheckReport() {
   const r = await api('/api/report/recheck', {});
   busy = false;
   if (r.report) REP = r.report;
+  if (REP && REP.today && REP.today.rows > 0) repBlocked = false;
   toast(r.report && r.report.today && r.report.today.rows ? 'Đã thấy báo cáo' : 'Chưa thấy',
         r.message || '', !!(r.report && r.report.today && r.report.today.rows));
   render();
