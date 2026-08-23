@@ -489,9 +489,11 @@ async function reportStatus(user, force = false) {
       amount: t ? t.amount : 0,
       approved: t ? t.approved : 0,
       rejected: t ? t.rejected : 0,
+      sources: t ? t.sources : {},        // dòng đến từ file nào
       exempt: D.isExempt(user.id, today),
       shift_ended: D.shiftEndedToday(user),
     },
+    sheets: sum.sources || [],
     fetched_at: sum.fetched_at,
     sheet_error: sum.error || null,
   };
@@ -505,10 +507,13 @@ async function reportGate(req, res, kind) {
   if (st.off || st.sheet_error) return null;
 
   if (kind === 'out' && st.today && st.today.rows === 0 && !st.today.exempt) {
+    const ten = (st.sheets || []).map((x) => x.name).join(', ');
     return {
       ok: false, report_required: true, report: st,
-      message: `Chưa có dòng nào của ${st.emp_code} trong sheet hôm nay. `
-             + 'Điền báo cáo rồi bấm "Tôi đã điền rồi". Ca không phát sinh việc thì bấm "Ca không phát sinh".',
+      message: `Chưa có dòng nào của ${st.emp_code} hôm nay ở bất kỳ file nào`
+             + (ten ? ` (${ten})` : '') + '. '
+             + 'Hoàn thành báo cáo và bấm "Tôi đã điền rồi". '
+             + 'Ca không phát sinh việc gì thì bấm "Ca không phát sinh".',
     };
   }
 
@@ -534,8 +539,10 @@ app.post('/api/report/recheck', requireUser, async (req, res) => {
     ok: true, report: st,
     message: st.sheet_error ? 'Không đọc được sheet: ' + st.sheet_error
       : st.today && st.today.rows > 0
-        ? `Đã thấy ${st.today.rows} dòng của bạn hôm nay.`
-        : 'Vẫn chưa thấy dòng nào của bạn. Kiểm tra cột Ngày và cột MaNV đã điền đúng chưa.',
+        ? `Đã thấy ${st.today.rows} dòng của bạn hôm nay`
+          + (Object.keys(st.today.sources || {}).length
+              ? ` (${Object.entries(st.today.sources).map(([k, v]) => `${k}: ${v}`).join(' · ')})` : '') + '.'
+        : 'Không tìm thấy dữ liệu báo cáo của bạn. Kiểm tra cột Ngày và cột MaNV đã điền đúng chưa.',
   });
 });
 
