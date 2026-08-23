@@ -253,13 +253,14 @@ async function act(url, body) {
 
 async function punch(kind) {
   if (busy) return;
-  const tên = { in: 'lên ca', out: 'xuống ca', log: 'chấm công' }[kind] || 'chấm công';
+  const tên = { in: 'lên ca', out: 'xuống ca' }[kind] || 'chấm công';
   const k = askKey(tên);
   if (k === null) return;
   busy = true;
   const r = await api('/api/punch', { kind, key: k });
   busy = false;
   if (r.key_required) { toast('Mã cá nhân', r.message, false); return; }
+  if (r.not_on_shift || r.already_in) { toast('Chưa thực hiện được', r.message, false); return; }
   if (r.report_required) {
     if (r.report) REP = r.report;
     repBlocked = true;              // từ giờ mới hiện thẻ nhắc
@@ -337,13 +338,11 @@ function shiftCard() {
       <span class="r">${sh.has_shift ? `${sh.shift_start}–${sh.shift_end} · giờ ${sh.location}`
         : 'hôm nay nghỉ'}</span></div>
     <div style="padding:14px 18px 4px">${state}</div>
-    <div class="punch">
-      <button class="pbtn ${sh.on_shift ? '' : 'go'}" onclick="punch('in')">
-        <span class="k">Bắt đầu</span>Lên ca</button>
-      <button class="pbtn ${sh.on_shift ? 'go' : ''}" onclick="punch('out')">
-        <span class="k">Kết thúc</span>Xuống ca</button>
-      <button class="pbtn" onclick="punch('log')">
-        <span class="k">Ghi nhận</span>Chấm công</button>
+    <div class="punch two">
+      <button class="pbtn ${sh.on_shift ? '' : 'go'}" ${sh.on_shift ? 'disabled' : ''}
+        onclick="punch('in')"><span class="k">Bắt đầu</span>Lên ca</button>
+      <button class="pbtn ${sh.on_shift ? 'go' : ''}" ${sh.on_shift ? '' : 'disabled'}
+        onclick="punch('out')"><span class="k">Kết thúc</span>Xuống ca</button>
     </div>
     ${sh.rows.length ? `<div class="log">${sh.rows.slice().reverse().map(r => `
       <div class="r"><span class="t">${hhmm(r.actual_at)}</span>
@@ -553,7 +552,7 @@ function reportCard() {
         ? `Ngày ${nợ.slice(0, 6).join(', ')}${nợ.length > 6 ? '…' : ''}. Còn nợ thì không vào ca mới được.`
         : `Chưa có dòng nào mang mã <b>${REP.emp_code}</b> hôm nay ở bất kỳ file nào.`
           + ((REP.sheets || []).length ? `<br>Các file: ${REP.sheets.map(x => x.name).join(', ')}.` : '')
-          + ' Bổ sung dữ liệu báo cáo và bấm "Tôi đã điền rồi".'}</div>
+          + ' Yêu cầu hoàn thành báo cáo và bấm "Tôi đã điền rồi".'}</div>
       <div class="acts2">
         <button class="btn btn-sm" onclick="recheckReport()">Tôi đã điền rồi</button>
         ${noHomNay ? '<button class="btn btn-sm" onclick="noActivity()">Ca không phát sinh</button>' : ''}
@@ -638,7 +637,7 @@ function render() {
     </div>
     ${offCard()}
     <div class="hint">Mỗi bộ phận chỉ 1 người rời chỗ cùng lúc.<br>
-      Quên bấm “Dừng lại” thì hệ thống tự đóng sau khi quá giờ 30 phút và ghi chú lại.</div>`;
+      Quên bấm “Dừng lại” hệ thống tự đóng sau khi quá giờ 30 phút và ghi chú lại.</div>`;
 }
 
 function tick() {
