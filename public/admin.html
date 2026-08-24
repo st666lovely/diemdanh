@@ -898,7 +898,9 @@ async function loadShiftLog() {
     <div class="card card-p" style="margin-bottom:var(--s4);background:var(--card-2)">
       <div class="sub" style="line-height:1.7">
         Mỗi dòng là một ca của một người: giờ vào, giờ ra, có trễ hay không.
-        Phải lên ca <b>trước giờ ca ${d.early_min} phút</b> — quá mốc đó dù 1 phút cũng tính là trễ.
+        ${d.early_min > 0
+          ? `Phải lên ca <b>trước giờ ca ${d.early_min} phút</b> — quá mốc đó dù 1 phút cũng tính là trễ.`
+          : 'Mốc tính trễ là <b>đúng giờ ca</b> — quá 1 phút là trễ 1 phút, trễ bao nhiêu ghi bấy nhiêu.'}
       </div></div>
     <div class="kpis">
       <div class="kpi"><div class="n">${d.stats.total}</div><div class="l">Ca trong kỳ</div></div>
