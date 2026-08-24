@@ -442,10 +442,11 @@ function history(f = {}, scope = null) {
 const PUNCH_KINDS = { in: 'Lên ca', out: 'Xuống ca', log: 'Chấm công (đã bỏ)' };
 const PUNCH_ACTIVE = ['in', 'out'];
 
-/* Yêu cầu lên ca SỚM trước giờ ca bấy nhiêu phút.
-   Mốc chuẩn = giờ ca − SHIFT_EARLY_MIN. Quá mốc đó dù 1 phút cũng là trễ. */
+/* Mốc chuẩn để tính trễ = ĐÚNG GIỜ CA. Quá giờ ca dù 1 phút cũng là trễ,
+   trễ bao nhiêu phút thì ghi bấy nhiêu.
+   Đặt SHIFT_EARLY_MIN > 0 nếu muốn bắt có mặt sớm trước giờ ca. */
 const SHIFT_EARLY_MIN = Math.max(0,
-  process.env.SHIFT_EARLY_MIN === undefined ? 10 : (Number(process.env.SHIFT_EARLY_MIN) || 0));
+  process.env.SHIFT_EARLY_MIN === undefined ? 0 : (Number(process.env.SHIFT_EARLY_MIN) || 0));
 
 // Ngưỡng phân mức, chỉnh được qua biến môi trường
 const LATE_IN_1  = Math.max(1, Number(process.env.LATE_IN_MIN1) || 1);    // trễ nhẹ từ 1 phút
@@ -604,7 +605,9 @@ function punch(user, kind, ip, ua) {
   const at = now();
   const tz = tzOf(user.location);
   const sched = scheduledFor(user, kind, at);
-  const diff = sched ? Math.round((at - sched) / 60000) : 0;
+  // Cắt phần giây thay vì làm tròn: bấm lúc 20:43:57 với ca 20:43 là 0 phút,
+  // không phải 1 phút. Trễ chỉ tính khi đã qua trọn một phút.
+  const diff = sched ? Math.floor((at - sched) / 60000) : 0;
   const level = lateOf(kind, diff);
   const hhmm = new Date(at).toLocaleTimeString('vi-VN', { hour12: false, timeZone: tz });
 
@@ -619,9 +622,9 @@ function punch(user, kind, ip, ua) {
     : null;
 
   let message;
-  const moTaMoc = kind === 'in' && SHIFT_EARLY_MIN > 0
-    ? `phải có mặt trước ${gioLich}`      // đã trừ sẵn 10 phút
-    : `lịch ${gioLich}`;
+  const moTaMoc = kind === 'in'
+    ? (SHIFT_EARLY_MIN > 0 ? `phải có mặt trước ${gioLich}` : `giờ ca ${gioLich}`)
+    : `giờ tan ca ${gioLich}`;
 
   if (level) {
     message = `${PUNCH_KINDS[kind]} lúc ${hhmm} — ${LATE_LEVELS[level].label}: `
