@@ -23,7 +23,7 @@
   <div><div class="tt" id="tt"></div><div class="ts" id="ts"></div></div></div>
 
 <div id="gate" class="gate" hidden></div>
-<div id="app" class="wrap" hidden></div>
+<div id="app" class="wrap dash" hidden></div>
 
 <script>
 /* Nếu đang mở qua /k/<key> thì trỏ manifest kèm key, để icon trên màn hình chính
@@ -308,7 +308,7 @@ function dateLine() {
 }
 
 function heroCard(d, mine, left, over) {
-  return `<div class="card hero ${mine ? 'run' : ''} ${over ? 'over' : ''}" id="hero">
+  return `<div class="card hero a-clock ${mine ? 'run' : ''} ${over ? 'over' : ''}" id="hero">
     <div class="lb">${mine ? mine.type_name : 'Thời gian hiện tại'}</div>
     <div class="big" id="big">${mine ? clk(left)
       : (() => { const c = clockParts();
@@ -333,7 +333,7 @@ function shiftCard() {
         : (sh.has_shift ? `<span class="pill">Chưa lên ca</span>`
                         : `<span class="pill">Hôm nay không có ca — bấm vẫn ghi nhận, không tính trễ</span>`));
 
-  return `<div class="card">
+  return `<div class="card a-shift">
     <div class="card-h"><span class="t">Ca hôm nay</span>
       <span class="r">${sh.has_shift
         ? `${sh.shift_start}–${sh.shift_end}${sh.ot ? ` +${sh.ot.hours}h` : ''} · giờ ${sh.location}`
@@ -366,10 +366,10 @@ function shiftCard() {
   </div>`;
 }
 
-function depCard(mine, locked) {
+function depBlock(mine, locked) {
   const holder = mine || locked;
   const hLeft = holder ? leftOf(holder) : 0;
-  return `<div class="card"><div class="dep ${holder ? (hLeft < 0 ? 'over' : 'busy') : ''}">
+  return `<div class="dep ${holder ? (hLeft < 0 ? 'over' : 'busy') : ''}">
     <div class="ic">${(S.me.department || '?').slice(0, 2)}</div>
     <div class="m">${holder
       ? `<div class="a">${mine ? 'Bạn đang rời vị trí' : holder.user_name}</div>
@@ -377,7 +377,7 @@ function depCard(mine, locked) {
       : `<div class="a">Bộ phận đang trống</div>
          <div class="b">${S.lane.headcount} nhân sự · bạn đi được</div>`}</div>
     ${holder ? `<div class="cd" data-cd="${holder.id}">${clk(hLeft)}</div>` : ''}
-  </div></div>`;
+  </div>`;
 }
 
 function offCard() {
@@ -419,7 +419,7 @@ function offCard() {
       onclick="toggleOff('${day}')">${d}</button>`;
   }
 
-  return `<div class="card">
+  return `<div class="card a-off">
     <div class="card-h"><span class="t">${o.has_schedule ? 'Lịch nghỉ' : 'Đăng ký nghỉ'}</span>
       <span class="r">${o.locked ? '🔒 tháng đã khóa' : `đã chọn ${o.used}/${o.max} ngày`}</span></div>
     ${o.has_schedule ? `<div class="offnote">
@@ -632,10 +632,10 @@ function render() {
   const T = S.today;
 
   const action = mine
-    ? `<div class="card card-p"><button class="btn btn-dark btn-block"
-        style="min-height:56px;font-size:17px;font-weight:700" onclick="act('/api/stop')">Dừng lại</button></div>`
-    : `<div class="card">
-        <div class="card-h"><span class="t">Rời vị trí</span></div>
+    ? `<div class="card-b"><button class="btn btn-dark btn-block btn-lg"
+        onclick="act('/api/stop')">Dừng lại</button></div>`
+    : `<div>
+        <div class="card-h" style="border-top:1px solid var(--line)"><span class="t">Rời vị trí</span></div>
         ${locked ? `<div class="blocked" style="margin-top:14px">
           <b>${locked.user_name}</b> đang “${locked.type_name}”. Chờ đến lượt rồi bấm lại.</div>` : ''}
         <div class="acts">${S.types.map(t => `
@@ -649,17 +649,13 @@ function render() {
   else if (Alarm.kind === 'rollcall') Alarm.stop();
 
   $('#app').innerHTML = `
-    <div class="bar"><span class="nm">${S.me.name}</span><span class="sp"></span>
+    <div class="bar span-all"><span class="nm">${S.me.name}</span><span class="sp"></span>
       ${S.me.role === 'admin' ? '<a class="pill" href="/admin">Quản trị</a>' : ''}</div>
-    ${rollCallCard()}
-    ${reportCard()}
-    ${soundCard()}
-    ${installCard()}
+    <div class="alerts span-all">${rollCallCard()}${reportCard()}${soundCard()}${installCard()}</div>
     ${heroCard(d, mine, left, over)}
     ${shiftCard()}
-    ${depCard(mine, locked)}
-    ${action}
-    <div class="card">
+    <div class="card a-acts">${depBlock(mine, locked)}${action}</div>
+    <div class="card a-stats">
       <div class="card-h"><span class="t">Rời vị trí hôm nay</span>
         <span class="r">${T.count ? T.count + ' lượt' : 'chưa có lượt nào'}</span></div>
       <div class="sum">
@@ -674,7 +670,7 @@ function render() {
             : Math.floor(r.duration_sec / 60) + 'p' + pad(r.duration_sec % 60)}</span></div>`).join('')}</div>` : ''}
     </div>
     ${offCard()}
-    <div class="hint">Mỗi bộ phận chỉ 1 người rời chỗ cùng lúc.<br>
+    <div class="hint span-all">Mỗi bộ phận chỉ 1 người rời chỗ cùng lúc.<br>
       Quên bấm “Dừng lại” thì hệ thống tự đóng sau khi quá giờ 30 phút và ghi chú lại.</div>`;
 }
 
