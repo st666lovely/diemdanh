@@ -1,0 +1,726 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Trạm trực</title>
+<meta name="theme-color" content="#F1F3F2">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Trạm trực">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="manifest" href="/manifest.webmanifest" id="mf">
+<link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png">
+<link rel="apple-touch-icon" href="/icon-180.png">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+
+<div class="toast hide" id="toast"><span class="b"></span>
+  <div><div class="tt" id="tt"></div><div class="ts" id="ts"></div></div></div>
+
+<div id="gate" class="gate" hidden></div>
+<div id="app" class="wrap" hidden></div>
+
+<script>
+/* Nếu đang mở qua /k/<key> thì trỏ manifest kèm key, để icon trên màn hình chính
+   mở đúng link của người này. Không làm vậy thì trên iPhone mở icon sẽ mất phiên. */
+(function () {
+  const m = location.pathname.match(/^\/k\/([A-Za-z0-9]+)/);
+  if (m) {
+    const el = document.getElementById('mf');
+    if (el) el.href = '/manifest.webmanifest?k=' + m[1].toUpperCase();
+  }
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
+  }
+})();
+
+const $ = s => document.querySelector(s);
+const pad = n => String(n).padStart(2, '0');
+const clk = s => (s < 0 ? '-' : '') + pad(Math.floor(Math.abs(s) / 60)) + ':' + pad(Math.abs(s) % 60);
+let TZ = null;   // múi giờ khu vực của nhân viên, server gửi xuống
+const fmtTz = (t, o) => new Intl.DateTimeFormat('en-GB',
+  { timeZone: TZ || undefined, hour12: false, ...o }).format(new Date(t));
+const hhmm = t => TZ ? fmtTz(t, { hour: '2-digit', minute: '2-digit' })
+                     : pad(new Date(t).getHours()) + ':' + pad(new Date(t).getMinutes());
+const DOW = ['Chủ Nhật','Thứ Hai','Thứ Ba','Thứ Tư','Thứ Năm','Thứ Sáu','Thứ Bảy'];
+const DOW_S = ['CN','T2','T3','T4','T5','T6','T7'];
+
+let S = null, skew = 0, busy = false, offYm = null;
+
+/* ============================================================
+   BÁO ĐỘNG — chuông, rung, thông báo hệ thống, nháy màn hình
+
+   Không ép được máy kêu khi loa đã tắt ở tầng hệ điều hành: trang web
+   không có quyền chỉnh âm lượng. Nên đánh cùng lúc nhiều kênh, tắt tiếng
+   thì vẫn còn rung, thông báo và màn hình nháy.
+   ============================================================ */
+const Alarm = {
+  ctx: null, loop: null, blink: null, kind: null, unlocked: false,
+  wakeLock: null, _noti: null, _title: null,
+
+  /* Trình duyệt chặn phát tiếng nếu chưa có thao tác người dùng.
+     Mở khoá ở lần chạm đầu tiên để các lần sau kêu được. */
+  async unlock() {
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return false;
+      if (!this.ctx) this.ctx = new AC();
+      if (this.ctx.state === 'suspended') await this.ctx.resume();
+      const b = this.ctx.createBuffer(1, 1, 22050);      // đoạn câm cho iOS ghi nhận
+      const src = this.ctx.createBufferSource();
+      src.buffer = b; src.connect(this.ctx.destination); src.start(0);
+      this.unlocked = true;
+      if ('Notification' in window && Notification.permission === 'default') {
+        Notification.requestPermission().catch(function () {});
+      }
+      this.keepAwake();
+      return true;
+    } catch (e) { return false; }
+  },
+
+  /* Giữ màn hình không tắt — tắt màn thì không thấy thẻ điểm danh */
+  async keepAwake() {
+    try {
+      if ('wakeLock' in navigator && !this.wakeLock) {
+        this.wakeLock = await navigator.wakeLock.request('screen');
+        this.wakeLock.addEventListener('release', () => { this.wakeLock = null; });
+      }
+    } catch (e) {}
+  },
+
+  /* Tự dựng tiếng bíp, không cần file âm thanh */
+  tone(freq, at, dur, gain) {
+    if (!this.ctx) return;
+    const t0 = this.ctx.currentTime + at;
+    const o = this.ctx.createOscillator();
+    const g = this.ctx.createGain();
+    o.type = 'square';
+    o.frequency.setValueAtTime(freq, t0);
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.exponentialRampToValueAtTime(gain, t0 + 0.01);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    o.connect(g); g.connect(this.ctx.destination);
+    o.start(t0); o.stop(t0 + dur + 0.02);
+  },
+
+  ring(kind) {
+    if (!this.ctx) return;
+    if (this.ctx.state === 'suspended') this.ctx.resume().catch(function () {});
+    if (kind === 'overtime') {
+      this.tone(440, 0, 0.18, 0.35);
+      this.tone(330, 0.22, 0.28, 0.35);
+    } else {
+      this.tone(880, 0, 0.12, 0.4);
+      this.tone(1100, 0.16, 0.12, 0.4);
+      this.tone(880, 0.32, 0.2, 0.4);
+    }
+  },
+
+  buzz(kind) {
+    try {
+      if (navigator.vibrate) {
+        navigator.vibrate(kind === 'overtime' ? [300, 120, 300] : [200, 100, 200, 100, 400]);
+      }
+    } catch (e) {}
+  },
+
+  /* Thông báo hệ thống dùng chuông riêng của máy, kêu cả khi tab bị ẩn.
+     iPhone chỉ chạy khi đã cài app ra màn hình chính. */
+  notify(kind) {
+    try {
+      if (!('Notification' in window) || Notification.permission !== 'granted') return;
+      if (this._noti) { this._noti.close(); this._noti = null; }
+      this._noti = new Notification(
+        kind === 'overtime' ? 'Đã quá giờ rời vị trí' : 'Đến lượt điểm danh',
+        { body: kind === 'overtime'
+            ? 'Bấm Dừng lại ngay để không bị ghi quá giờ.'
+            : 'Xác nhận có mặt bằng mã cá nhân, quá giờ là tính vắng.',
+          icon: '/icon-192.png', badge: '/icon-192.png',
+          tag: 'tram-truc', renotify: true, requireInteraction: true });
+      this._noti.onclick = () => { window.focus(); if (this._noti) this._noti.close(); };
+    } catch (e) {}
+  },
+
+  start(kind) {
+    if (this.kind === kind) return;
+    this.stop();
+    this.kind = kind;
+    document.body.classList.add('alarming');
+
+    const beat = () => { this.ring(kind); this.buzz(kind); };
+    beat();
+    this.notify(kind);
+    this.loop = setInterval(beat, kind === 'overtime' ? 4000 : 2500);
+
+    if (!this._title) this._title = document.title;
+    let on = false;
+    this.blink = setInterval(() => {
+      on = !on;
+      document.title = on ? (kind === 'overtime' ? '⚠ QUÁ GIỜ' : '● ĐIỂM DANH') : this._title;
+    }, 700);
+  },
+
+  stop() {
+    clearInterval(this.loop); clearInterval(this.blink);
+    this.loop = null; this.blink = null; this.kind = null;
+    document.body.classList.remove('alarming');
+    if (this._title) document.title = this._title;
+    if (this._noti) { try { this._noti.close(); } catch (e) {} this._noti = null; }
+    try { if (navigator.vibrate) navigator.vibrate(0); } catch (e) {}
+  },
+};
+
+['pointerdown', 'keydown', 'touchstart'].forEach(function (ev) {
+  window.addEventListener(ev, function () { Alarm.unlock(); }, { once: true, passive: true });
+});
+document.addEventListener('visibilitychange', function () {
+  if (!document.hidden) Alarm.keepAwake();
+});
+const nowMs = () => Date.now() + skew;
+const leftOf = i => Math.round((i.started_at + i.limit_minutes * 60000 - nowMs()) / 1000);
+const pctOf  = i => Math.min(100, ((nowMs() - i.started_at) / (i.limit_minutes * 60000)) * 100);
+
+function toast(t, s, ok) {
+  const el = $('#toast');
+  el.classList.toggle('err', !ok); el.classList.remove('hide');
+  $('#tt').textContent = t; $('#ts').textContent = s || '';
+  clearTimeout(toast._t); toast._t = setTimeout(() => el.classList.add('hide'), 4200);
+}
+
+/* ---------- Màn chặn ---------- */
+const GATES = {
+  nokey:  { ic: '⊘', h: 'Link không hợp lệ',
+    p: 'Link này không tồn tại hoặc đã bị thu hồi. Liên hệ quản lý để nhận link mới.' },
+  none:   { ic: '→', h: 'Cần link riêng để vào',
+    p: 'Mở link quản lý đã gửi cho bạn. Lưu vào màn hình chính để lần sau vào thẳng, không phải nhập gì.' },
+};
+function showGate(kind) {
+  const g = GATES[kind] || GATES.none;
+  $('#app').hidden = true; $('#gate').hidden = false;
+  $('#gate').innerHTML = `<div class="card">
+    <div class="ic">${g.ic}</div><h1>${g.h}</h1><p>${g.p}</p>
+    <p style="margin-top:22px;font-size:13px;color:var(--tx-3)">Bạn là quản lý?
+      <a href="/admin" style="color:var(--pri);font-weight:600">Đăng nhập tại đây</a></p></div>`;
+}
+
+/* ---------- API ---------- */
+/* Hỏi mã cá nhân trước mỗi thao tác. Mã lấy từ lương tháng trước nên
+   không ai đưa cho đồng nghiệp — đó là lý do dùng nó thay vì PIN thường. */
+function askKey(việc) {
+  if (!S || !S.key || !S.key.required) return '';
+  const k = prompt(`Nhập mã cá nhân để ${việc}`);
+  return k === null ? null : String(k).trim();
+}
+
+async function api(url, body, method) {
+  const r = await fetch(url, {
+    method: method || 'POST', headers: { 'Content-Type': 'application/json' },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  return { status: r.status, ...(await r.json().catch(() => ({}))) };
+}
+
+async function load() {
+  const r = await fetch('/api/state');
+  if (r.status === 401) { showGate(new URLSearchParams(location.search).get('e') || 'none'); return; }
+  const d = await r.json();
+  skew = d.server_time - Date.now();
+  S = d;
+  TZ = d.shift && d.shift.timezone ? d.shift.timezone : null;
+  if (!offYm) offYm = d.offs.ym;
+  $('#gate').hidden = true; $('#app').hidden = false;
+  render();
+}
+
+async function act(url, body) {
+  if (busy) return;
+  const việc = url.includes('/stop') ? 'dừng hoạt động' : 'bắt đầu hoạt động';
+  const k = askKey(việc);
+  if (k === null) return;
+  busy = true;
+  const r = await api(url, { ...(body || {}), key: k });
+  busy = false;
+  if (r.ok && url.includes('/stop')) Alarm.stop();
+  if (r.state) { S = r.state; skew = S.server_time - Date.now(); }
+  toast(r.ok ? 'Đã ghi nhận' : 'Chưa thực hiện được', r.message || '', !!r.ok);
+  await load();
+}
+
+async function punch(kind) {
+  if (busy) return;
+  const tên = { in: 'lên ca', out: 'xuống ca' }[kind] || 'chấm công';
+  const k = askKey(tên);
+  if (k === null) return;
+  busy = true;
+  const r = await api('/api/punch', { kind, key: k });
+  busy = false;
+  if (r.key_required) { toast('Mã cá nhân', r.message, false); return; }
+  if (r.not_on_shift || r.already_in) { toast('Chưa thực hiện được', r.message, false); return; }
+  if (r.report_required) {
+    if (r.report) REP = r.report;
+    repBlocked = true;              // từ giờ mới hiện thẻ nhắc
+    toast('Chưa nộp báo cáo', r.message, false);
+    render();
+    return;
+  }
+  toast(r.ok ? (r.late_level ? 'Đã ghi nhận — có trễ' : 'Đã ghi nhận') : 'Chưa thực hiện được',
+        r.message || '', r.ok && !r.late_level);
+  await load();
+}
+
+async function toggleOff(day) {
+  if (busy) return; busy = true;
+  const r = await api('/api/offs/toggle', { day });
+  busy = false;
+  toast(r.ok ? 'Đã cập nhật' : 'Chưa cập nhật được', r.message || '', !!r.ok);
+  if (r.ok) { const s = await fetch('/api/offs?ym=' + offYm); S.offs = await s.json(); render(); }
+}
+
+async function moveMonth(delta) {
+  const [y, m] = offYm.split('-').map(Number);
+  const d = new Date(y, m - 1 + delta, 1);
+  offYm = `${d.getFullYear()}-${pad(d.getMonth() + 1)}`;
+  const s = await fetch('/api/offs?ym=' + offYm);
+  S.offs = await s.json();
+  render();
+}
+
+/* ---------- Vẽ ---------- */
+function clockParts() {
+  const t = nowMs();
+  if (!TZ) { const d = new Date(t); return [pad(d.getHours()), pad(d.getMinutes()), pad(d.getSeconds())]; }
+  return fmtTz(t, { hour: '2-digit', minute: '2-digit', second: '2-digit' }).split(':');
+}
+function dateLine() {
+  const t = nowMs();
+  if (!TZ) { const d = new Date(t);
+    return `${DOW[d.getDay()]}, ${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()}`; }
+  const p = new Intl.DateTimeFormat('en-GB', { timeZone: TZ, weekday: 'short',
+    day: '2-digit', month: '2-digit', year: 'numeric' }).formatToParts(new Date(t));
+  const g = k => (p.find(x => x.type === k) || {}).value;
+  const wd = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 }[g('weekday')] ?? 0;
+  return `${DOW[wd]}, ${g('day')}/${g('month')}/${g('year')}`;
+}
+
+function heroCard(d, mine, left, over) {
+  return `<div class="card hero ${mine ? 'run' : ''} ${over ? 'over' : ''}" id="hero">
+    <div class="lb">${mine ? mine.type_name : 'Thời gian hiện tại'}</div>
+    <div class="big" id="big">${mine ? clk(left)
+      : (() => { const c = clockParts();
+          return `${c[0]}<span class="s">:</span>${c[1]}<span class="s">:</span>${c[2]}`; })()}</div>
+    <div class="sub" id="heroSub">${mine
+      ? `Bắt đầu ${hhmm(mine.started_at)} · cho phép ${mine.limit_minutes} phút`
+      : dateLine()}</div>
+    ${mine ? `<div class="track"><i id="trk" style="width:${pctOf(mine)}%"></i></div>` : `
+      <div class="tags"><span class="pill">${S.me.department || '—'}</span>
+        ${S.me.brand ? `<span class="pill pri">${S.me.brand}</span>` : ''}
+        ${S.shift && S.shift.location ? `<span class="pill">${S.shift.location}</span>` : ''}</div>`}
+  </div>`;
+}
+
+/* Ca hôm nay: 3 nút chấm công + lịch sử bấm trong ngày */
+function shiftCard() {
+  const sh = S.shift;
+  const state = sh.on_shift
+    ? `<span class="pill pri"><span class="dot"></span>Đang trong ca từ ${hhmm(sh.checked_in_at)}</span>`
+    : (sh.checked_out_at
+        ? `<span class="pill">Đã xuống ca lúc ${hhmm(sh.checked_out_at)}</span>`
+        : (sh.has_shift ? `<span class="pill">Chưa lên ca</span>`
+                        : `<span class="pill">Hôm nay không có ca — bấm vẫn ghi nhận, không tính trễ</span>`));
+
+  return `<div class="card">
+    <div class="card-h"><span class="t">Ca hôm nay</span>
+      <span class="r">${sh.has_shift
+        ? `${sh.shift_start}–${sh.shift_end}${sh.ot ? ` +${sh.ot.hours}h` : ''} · giờ ${sh.location}`
+        : 'hôm nay nghỉ'}</span></div>
+    ${sh.has_shift && sh.must_be_in_by ? `<div class="offnote" style="padding:var(--s3) var(--s4) 0">
+      Phải có mặt trước <b>${hhmm(sh.must_be_in_by)}</b> — quá mốc này dù 1 phút cũng tính là trễ.
+    </div>` : ''}
+    <div style="padding:14px 18px 4px">${state}</div>
+    ${sh.ot ? `<div class="offnote" style="padding:0 var(--s4) var(--s2)">
+      <span class="pill amb">OT +${sh.ot.hours} giờ</span>
+      <span class="sub"> ${esc(sh.ot.reason || '')}</span>
+      <button class="btn btn-sm" style="margin-left:var(--s2)" onclick="clearOT()">Bỏ OT</button>
+    </div>` : ''}
+    <div class="punch two">
+      <button class="pbtn ${sh.on_shift ? '' : 'go'}" ${sh.on_shift ? 'disabled' : ''}
+        onclick="punch('in')"><span class="k">Bắt đầu</span>Lên ca</button>
+      <button class="pbtn ${sh.on_shift ? 'go' : ''}" ${sh.on_shift ? '' : 'disabled'}
+        onclick="punch('out')"><span class="k">Kết thúc</span>Xuống ca</button>
+    </div>
+    ${sh.has_shift && !sh.ot ? `<div style="padding:0 var(--s4) var(--s4)">
+      <button class="btn btn-block" onclick="addOT()">Hôm nay có OT</button>
+      <div class="sub" style="margin-top:6px;text-align:center">
+        Bấm khi được yêu cầu làm thêm — ca sẽ kéo dài, xuống ca muộn không bị tính trễ.</div>
+    </div>` : ''}
+    ${sh.rows.length ? `<div class="log">${sh.rows.slice().reverse().map(r => `
+      <div class="r"><span class="t">${hhmm(r.actual_at)}</span>
+        <span class="n">${r.kind_label}</span>
+        ${r.late_label ? `<span class="pill ${r.late_level === 'in5' ? 'amb' : 'red'}">${r.late_label}</span>`
+                       : `<span class="d">đúng giờ</span>`}</div>`).join('')}</div>` : ''}
+  </div>`;
+}
+
+function depCard(mine, locked) {
+  const holder = mine || locked;
+  const hLeft = holder ? leftOf(holder) : 0;
+  return `<div class="card"><div class="dep ${holder ? (hLeft < 0 ? 'over' : 'busy') : ''}">
+    <div class="ic">${(S.me.department || '?').slice(0, 2)}</div>
+    <div class="m">${holder
+      ? `<div class="a">${mine ? 'Bạn đang rời vị trí' : holder.user_name}</div>
+         <div class="b">${holder.type_name} · bộ phận đang khóa</div>`
+      : `<div class="a">Bộ phận đang trống</div>
+         <div class="b">${S.lane.headcount} nhân sự · bạn đi được</div>`}</div>
+    ${holder ? `<div class="cd" data-cd="${holder.id}">${clk(hLeft)}</div>` : ''}
+  </div></div>`;
+}
+
+function offCard() {
+  const o = S.offs;
+  const [y, m] = o.ym.split('-').map(Number);
+  const first = new Date(y, m - 1, 1);
+  const dim = new Date(y, m, 0).getDate();
+  const lead = first.getDay();
+  const today = new Date();
+  const isThis = today.getFullYear() === y && today.getMonth() + 1 === m;
+
+  // Ngày đã có đồng nghiệp cùng bộ phận nhận -> làm mờ ngay, khỏi bấm rồi mới báo lỗi
+  const takenBy = {};
+  (o.taken || []).forEach(t => { takenBy[t.day] = t.names.join(', '); });
+
+  const workSet = new Set(o.work_days || []);
+
+  let cells = '';
+  for (let i = 0; i < lead; i++) cells += '<div class="od blank"></div>';
+  for (let d = 1; d <= dim; d++) {
+    const day = `${o.ym}-${pad(d)}`;
+    const on = o.days.includes(day);                       // mình đã đăng ký
+    const hasShift = workSet.has(day);                     // lịch chính thức có xếp ca
+    const isToday = isThis && today.getDate() === d;
+    const busy = !on && takenBy[day];
+    const full = o.used >= o.max && !on;
+    const dis = o.locked || full || !!busy;
+
+    // 4 trạng thái: đăng ký & được duyệt / đăng ký nhưng vẫn phải làm /
+    // lịch cho nghỉ mà mình không xin / còn trống
+    let cls = '', tip = '';
+    if (on && o.has_schedule && hasShift) { cls = 'on rejected'; tip = 'Bạn xin nghỉ nhưng lịch vẫn xếp ca'; }
+    else if (on) { cls = 'on'; tip = o.has_schedule ? 'Đã được duyệt nghỉ' : 'Đã đăng ký, chờ xếp lịch'; }
+    else if (o.has_schedule && !hasShift) { cls = 'rosteroff'; tip = 'Lịch cho nghỉ (bạn không đăng ký)'; }
+    else if (busy) { cls = 'busy'; tip = `${takenBy[day]} đã nhận ngày này`; }
+
+    cells += `<button class="od ${cls} ${isToday ? 'today' : ''}"
+      ${dis ? 'disabled' : ''} ${tip ? `title="${tip}"` : ''}
+      onclick="toggleOff('${day}')">${d}</button>`;
+  }
+
+  return `<div class="card">
+    <div class="card-h"><span class="t">${o.has_schedule ? 'Lịch nghỉ' : 'Đăng ký nghỉ'}</span>
+      <span class="r">${o.locked ? '🔒 tháng đã khóa' : `đã chọn ${o.used}/${o.max} ngày`}</span></div>
+    ${o.has_schedule ? `<div class="offnote">
+      Lịch tháng này đã xếp xong. Bạn đăng ký ${o.used} ngày, được duyệt <b>${o.approved}</b> ngày${
+        o.rejected ? `, còn <b style="color:var(--red)">${o.rejected}</b> ngày vẫn phải làm` : ''}.
+      </div>` : `<div class="offnote">
+      Lịch tháng này chưa xếp. Đăng ký sớm để quản lý xếp ca theo nguyện vọng.
+      </div>`}
+    <div class="offnav">
+      <button class="btn btn-sm" onclick="moveMonth(-1)">‹</button>
+      <b>Tháng ${m}/${y}</b>
+      <button class="btn btn-sm" onclick="moveMonth(1)">›</button>
+    </div>
+    <div class="odow">${DOW_S.map(d => `<span>${d}</span>`).join('')}</div>
+    <div class="ogrid">${cells}</div>
+    <div class="offlegend">
+      <span><i class="sw on"></i>${o.has_schedule ? 'Được duyệt' : 'Đã đăng ký'}</span>
+      ${o.has_schedule ? '<span><i class="sw rejected"></i>Vẫn phải làm</span>' : ''}
+      ${o.has_schedule ? '<span><i class="sw rosteroff"></i>Lịch cho nghỉ</span>' : ''}
+      <span><i class="sw busy"></i>Người khác đã nhận</span>
+      <span><i class="sw"></i>Còn trống</span>
+    </div>
+    <div class="hint" style="margin:8px 0 16px">${o.locked
+      ? 'Quản lý đã khóa tháng này. Cần đổi thì báo quản lý.'
+      : `Chạm vào ngày để đăng ký hoặc bỏ. Tối đa ${o.max} ngày mỗi tháng,
+         và mỗi ngày bộ phận chỉ ${o.per_day} người nghỉ.`}</div>
+  </div>`;
+}
+
+const isIOS = /iP(hone|ad|od)/.test(navigator.userAgent)
+  || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const isStandalone = window.navigator.standalone === true
+  || (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
+
+/* Nhắc cài lên màn hình chính. Quan trọng: phải cài TRƯỚC khi bấm lần đầu,
+   vì lần bấm đầu tiên là lúc link gắn cứng vào thiết bị. */
+/* Trình duyệt chặn tiếng tới khi người dùng chạm màn hình lần đầu.
+   Nút này để chủ động mở khoá và xin quyền thông báo ngay đầu ca. */
+function soundCard() {
+  const cần = !Alarm.unlocked
+    || (('Notification' in window) && Notification.permission !== 'granted');
+  if (!cần) return '';
+  return `<div class="card note-card warn">
+    <div class="ic">🔔</div>
+    <div class="m">
+      <div class="a">Bật âm báo cho ca này</div>
+      <div class="b">Cần bấm một lần mỗi khi mở app, trình duyệt mới cho phép kêu.
+        Bấm xong máy sẽ chuông và rung khi tới lượt điểm danh hoặc hết giờ rời vị trí.</div>
+    </div>
+    <button class="btn btn-dark" onclick="turnOnSound()">Bật</button>
+  </div>`;
+}
+
+async function turnOnSound() {
+  await Alarm.unlock();
+  if ('Notification' in window && Notification.permission === 'default') {
+    try { await Notification.requestPermission(); } catch (e) {}
+  }
+  Alarm.ring('rollcall');
+  toast('Đã bật âm báo',
+    Notification && Notification.permission === 'granted'
+      ? 'Máy sẽ chuông, rung và hiện thông báo khi tới lượt.'
+      : 'Máy sẽ chuông và rung. Cho phép thông báo để kêu cả khi tắt màn hình.', true);
+  render();
+}
+
+function installCard() {
+  if (isStandalone) return '';
+  if (localStorage.getItem('tt_hide_install') === '1') return '';
+  return `<div class="card note-card good">
+    <div class="ic">⌂</div>
+    <div class="m">
+      <div class="a">Cài lên màn hình chính</div>
+      <div class="b">${isIOS
+        ? 'Bấm nút Chia sẻ ở thanh dưới → “Thêm vào MH chính”.'
+        : 'Mở menu ⋮ của trình duyệt → “Cài đặt ứng dụng” / “Thêm vào màn hình chính”.'}
+        </div>
+    </div>
+    <button class="x" onclick="hideInstall()" aria-label="Ẩn">×</button>
+  </div>`;
+}
+function hideInstall() { localStorage.setItem('tt_hide_install', '1'); render(); }
+
+/* Thẻ điểm danh: hiện khi có lượt đang chờ trả lời. Đặt trên cùng, màu đỏ,
+   kèm đồng hồ đếm ngược tới hạn chót. */
+function rollCallCard() {
+  const rc = S.rollcall;
+  if (!rc) return '';
+  const left = Math.max(0, Math.round((rc.deadline_at - nowMs()) / 1000));
+  return `<div class="card note-card danger">
+    <div class="m">
+      <div class="a">${rc.is_makeup ? 'Điểm danh bù' : 'Điểm danh'}</div>
+      <div class="b">${rc.is_makeup
+        ? 'Lượt này bị hoãn lúc bạn đang rời vị trí. Xác nhận lại để không bị tính vắng.'
+        : 'Xác nhận bạn đang có mặt. Quá giờ là tính vắng ca này.'}</div>
+    </div>
+    <div class="cd" id="rcCd">${clk(left)}</div>
+    <button class="btn btn-dark" onclick="answerRollCall()">Xác nhận</button>
+  </div>`;
+}
+
+async function answerRollCall() {
+  if (busy) return;
+  const k = askKey('điểm danh');
+  if (k === null) return;
+  busy = true;
+  const r = await api('/api/rollcall/answer', { key: k });
+  busy = false;
+  if (r.ok) Alarm.stop();
+  toast(r.ok ? 'Đã điểm danh' : 'Chưa xác nhận được', r.message || '', !!r.ok);
+  await load();
+}
+
+/* Thẻ nợ báo cáo.
+   Nhắc "hôm nay chưa có dòng nào" chỉ hiện KHI SẮP/ĐÃ HẾT CA hoặc khi vừa bị
+   chặn lúc bấm Xuống ca — không hiện ngay đầu ca, vì đầu ca chưa làm gì thì
+   chưa có gì để báo cáo. Còn nợ ca CŨ thì hiện luôn, vì cái đó chặn Lên ca. */
+let REP = null;
+let repBlocked = false;      // bật khi bấm Xuống ca mà bị chặn
+
+function reportCard() {
+  if (!REP || REP.off || REP.sheet_error) return '';
+  const t = REP.today;
+  const chưaĐiền = t && t.rows === 0 && !t.exempt;
+  const đếnLúcNhắc = chưaĐiền && (repBlocked || (t && t.shift_ended));
+  if (!REP.owing.length && !đếnLúcNhắc) {
+    if (!t || !t.rows) return '';
+    const chiTiet = Object.entries(t.sources || {})
+      .map(([k, v]) => `${k}: ${v}`).join(' · ');
+    return `<div class="card note-card good">
+      <div class="ic">✓</div>
+      <div class="m"><div class="a">Báo cáo hôm nay: ${t.rows} dòng</div>
+        <div class="b">${chiTiet || 'Mã của bạn: <b>' + REP.emp_code + '</b>'}</div></div>
+    </div>`;
+  }
+
+  const nợ = REP.owing.map(d => d.split('-').reverse().slice(0, 2).join('/'));
+  const noHomNay = chưaĐiền;
+  return `<div class="card note-card danger">
+    <div class="ic">!</div>
+    <div class="m">
+      <div class="a">${REP.owing.length ? `Nợ báo cáo ${REP.owing.length} ca` : 'Hôm nay chưa có dòng nào'}</div>
+      <div class="b">${REP.owing.length
+        ? `Ngày ${nợ.slice(0, 6).join(', ')}${nợ.length > 6 ? '…' : ''}. Còn nợ thì không vào ca mới được.`
+        : `Chưa có dòng nào mang mã <b>${REP.emp_code}</b> hôm nay ở bất kỳ file nào.`
+          + ((REP.sheets || []).length ? `<br>Các file: ${REP.sheets.map(x => x.name).join(', ')}.` : '')
+          + ' Điền một file bất kỳ rồi bấm "Tôi đã điền rồi".'}</div>
+      <div class="acts">
+        <button class="btn btn-sm" onclick="recheckReport()">Tôi đã điền rồi</button>
+        ${noHomNay ? '<button class="btn btn-sm" onclick="noActivity()">Ca không phát sinh</button>' : ''}
+      </div>
+    </div>
+  </div>`;
+}
+
+async function loadReport(force) {
+  try {
+    const r = await fetch('/api/report/status' + (force ? '?refresh=1' : ''));
+    if (r.ok) { REP = await r.json(); render(); }
+  } catch (e) {}
+}
+
+async function recheckReport() {
+  if (busy) return; busy = true;
+  const r = await api('/api/report/recheck', {});
+  busy = false;
+  if (r.report) REP = r.report;
+  if (REP && REP.today && REP.today.rows > 0) repBlocked = false;
+  toast(r.report && r.report.today && r.report.today.rows ? 'Đã thấy báo cáo' : 'Chưa thấy',
+        r.message || '', !!(r.report && r.report.today && r.report.today.rows));
+  render();
+}
+
+async function addOT() {
+  const h = prompt('Làm thêm mấy giờ hôm nay?\n\nNhập số giờ, ví dụ 2 hoặc 1.5:');
+  if (!h) return;
+  const lý = prompt('Lý do OT (ai yêu cầu, việc gì):');
+  if (lý === null) return;
+  const k = askKey('ghi nhận OT');
+  if (k === null) return;
+  const r = await api('/api/ot', { hours: Number(h), reason: lý.trim(), key: k });
+  toast(r.ok ? 'Đã ghi nhận OT' : 'Chưa ghi được', r.message || '', !!r.ok);
+  await load();
+}
+
+async function clearOT() {
+  if (!confirm('Bỏ ghi nhận OT hôm nay?')) return;
+  const k = askKey('bỏ OT');
+  if (k === null) return;
+  const r = await fetch('/api/ot', {
+    method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ key: k }),
+  }).then(x => x.json()).catch(() => ({ ok: false }));
+  toast(r.ok ? 'Đã bỏ OT' : 'Không bỏ được', r.message || '', !!r.ok);
+  await load();
+}
+
+async function noActivity() {
+  const lý = prompt('Ca này không phát sinh việc gì?\n\nGhi rõ lý do (ít nhất 10 ký tự):');
+  if (!lý) return;
+  const r = await api('/api/report/no-activity', { reason: lý.trim() });
+  toast(r.ok ? 'Đã ghi nhận' : 'Chưa ghi được', r.message || '', !!r.ok);
+  if (r.ok) loadReport(true);
+}
+
+function render() {
+  const d = new Date(nowMs());
+  const mine = S.current, locked = S.locked_by;
+  const left = mine ? leftOf(mine) : 0, over = mine && left < 0;
+  const T = S.today;
+
+  const action = mine
+    ? `<div class="card card-p"><button class="btn btn-dark btn-block"
+        style="min-height:56px;font-size:17px;font-weight:700" onclick="act('/api/stop')">Dừng lại</button></div>`
+    : `<div class="card">
+        <div class="card-h"><span class="t">Rời vị trí</span></div>
+        ${locked ? `<div class="blocked" style="margin-top:14px">
+          <b>${locked.user_name}</b> đang “${locked.type_name}”. Chờ đến lượt rồi bấm lại.</div>` : ''}
+        <div class="acts">${S.types.map(t => `
+          <button class="act" ${t.disabled ? 'disabled' : ''} onclick="act('/api/start',{code:'${t.code}'})">
+            <div class="n">${t.name}</div>
+            <div class="d">${t.limit_minutes} phút${t.counts_toward_limit ? '' : ' · không khóa'}</div>
+          </button>`).join('')}</div></div>`;
+
+  // Có lượt điểm danh đang chờ thì kêu; xác nhận xong thì tắt
+  if (S.rollcall) Alarm.start('rollcall');
+  else if (Alarm.kind === 'rollcall') Alarm.stop();
+
+  $('#app').innerHTML = `
+    <div class="bar"><span class="nm">${S.me.name}</span><span class="sp"></span>
+      ${S.me.role === 'admin' ? '<a class="pill" href="/admin">Quản trị</a>' : ''}</div>
+    ${rollCallCard()}
+    ${reportCard()}
+    ${soundCard()}
+    ${installCard()}
+    ${heroCard(d, mine, left, over)}
+    ${shiftCard()}
+    ${depCard(mine, locked)}
+    ${action}
+    <div class="card">
+      <div class="card-h"><span class="t">Rời vị trí hôm nay</span>
+        <span class="r">${T.count ? T.count + ' lượt' : 'chưa có lượt nào'}</span></div>
+      <div class="sum">
+        <div><div class="n">${T.count}</div><div class="l">Lượt</div></div>
+        <div><div class="n">${T.minutes}</div><div class="l">Phút</div></div>
+        <div><div class="n ${T.over ? 'red' : ''}">${T.over}</div><div class="l">Quá giờ</div></div>
+      </div>
+      ${T.rows.length ? `<div class="log">${T.rows.map(r => `
+        <div class="r"><span class="t">${hhmm(r.started_at)}</span>
+          <span class="n">${r.type_name}${r.closed_by === 'auto' ? ' · quên bấm dừng' : ''}</span>
+          <span class="d ${r.is_over_limit ? 'red' : ''}">${r.duration_sec == null ? 'đang chạy'
+            : Math.floor(r.duration_sec / 60) + 'p' + pad(r.duration_sec % 60)}</span></div>`).join('')}</div>` : ''}
+    </div>
+    ${offCard()}
+    <div class="hint">Mỗi bộ phận chỉ 1 người rời chỗ cùng lúc.<br>
+      Quên bấm “Dừng lại” thì hệ thống tự đóng sau khi quá giờ 30 phút và ghi chú lại.</div>`;
+}
+
+function tick() {
+  if (!S) return;
+  const mine = S.current, big = $('#big'), hero = $('#hero'), trk = $('#trk');
+  if (big) {
+    if (mine) {
+      const l = leftOf(mine);
+      big.textContent = clk(l);
+      hero.classList.toggle('over', l < 0);
+      // Hết giờ hoạt động -> báo động, dừng khi bấm Dừng lại
+      if (l < 0 && !S.rollcall) Alarm.start('overtime');
+      else if (l >= 0 && Alarm.kind === 'overtime') Alarm.stop();
+      if (trk) trk.style.width = pctOf(mine) + '%';
+      const sub = $('#heroSub');
+      if (sub && l < 0) sub.textContent = `Bắt đầu ${hhmm(mine.started_at)} · đã quá ${Math.floor(-l / 60)} phút`;
+    } else {
+      const c = clockParts();
+      big.innerHTML = `${c[0]}<span class="s">:</span>${c[1]}<span class="s">:</span>${c[2]}`;
+      if (Alarm.kind === 'overtime') Alarm.stop();
+    }
+  }
+  const rcEl = $('#rcCd');
+  if (rcEl && S.rollcall) {
+    const l = Math.round((S.rollcall.deadline_at - nowMs()) / 1000);
+    if (l <= 0) load(); else rcEl.textContent = clk(l);
+  }
+
+  document.querySelectorAll('[data-cd]').forEach(el => {
+    const h = (S.current && S.current.id == el.dataset.cd) ? S.current
+            : (S.locked_by && S.locked_by.id == el.dataset.cd) ? S.locked_by : null;
+    if (!h) return;
+    const l = leftOf(h);
+    el.textContent = clk(l);
+    const box = el.closest('.dep');
+    if (box && l < 0) { box.classList.add('over'); box.classList.remove('busy'); }
+  });
+}
+
+load();
+loadReport();
+setInterval(() => loadReport(), 5 * 60000);   // 5 phút đọc lại một lần
+setInterval(tick, 1000);
+setInterval(load, 20000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) load(); });
+</script>
+</body>
+</html>
