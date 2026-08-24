@@ -150,6 +150,7 @@ textarea{line-height:1.55;resize:vertical}
     "bar    bar    bar"
     "alert  alert  alert"
     "clock  shift  off"
+    "timer  acts   off"
     "stats  acts   off"
     "hint   hint   hint";
   padding:var(--s4) var(--s5) var(--s6);
@@ -157,6 +158,7 @@ textarea{line-height:1.55;resize:vertical}
 .wrap.dash .bar{grid-area:bar}
 .wrap.dash .alerts{grid-area:alert}
 .wrap.dash .a-clock{grid-area:clock}
+.wrap.dash .a-timer{grid-area:timer}
 .wrap.dash .a-shift{grid-area:shift}
 .wrap.dash .a-acts{grid-area:acts}
 .wrap.dash .a-stats{grid-area:stats}
@@ -287,6 +289,9 @@ tr.row-alert:hover{background:#F8DEDA}
 .hero .big .s{color:var(--line-2);font-weight:600}
 .hero .sub{font-size:14px;color:var(--tx-2);margin-top:var(--s3)}
 .hero .tags{display:flex;justify-content:center;gap:var(--s2);margin-top:var(--s4);flex-wrap:wrap}
+.hero.idle{background:var(--card-2)}
+.hero.idle .big{color:var(--line-2)}
+.hero.idle .lb{color:var(--tx-3)}
 .hero.run{background:var(--amb-s);border-color:var(--amb-l)}
 .hero.run .lb,.hero.run .big{color:var(--amb)}
 .hero.over{background:var(--red-s);border-color:var(--red-l)}
@@ -504,6 +509,7 @@ body.alarming::after{
       "bar   bar"
       "alert alert"
       "clock shift"
+      "timer acts"
       "stats acts"
       "off   off"
       "hint  hint";
@@ -513,7 +519,7 @@ body.alarming::after{
 @media(max-width:760px){
   .wrap.dash{
     grid-template-columns:1fr;padding:var(--s3) var(--s3) 48px;
-    grid-template-areas:"bar" "alert" "clock" "shift" "acts" "stats" "off" "hint";
+    grid-template-areas:"bar" "alert" "timer" "clock" "shift" "acts" "stats" "off" "hint";
   }
 }
 @media(max-width:640px){
