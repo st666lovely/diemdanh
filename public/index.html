@@ -308,18 +308,35 @@ function dateLine() {
 }
 
 function heroCard(d, mine, left, over) {
-  return `<div class="card hero a-clock ${mine ? 'run' : ''} ${over ? 'over' : ''}" id="hero">
-    <div class="lb">${mine ? mine.type_name : 'Thời gian hiện tại'}</div>
-    <div class="big" id="big">${mine ? clk(left)
-      : (() => { const c = clockParts();
-          return `${c[0]}<span class="s">:</span>${c[1]}<span class="s">:</span>${c[2]}`; })()}</div>
-    <div class="sub" id="heroSub">${mine
-      ? `Bắt đầu ${hhmm(mine.started_at)} · cho phép ${mine.limit_minutes} phút`
-      : dateLine()}</div>
-    ${mine ? `<div class="track"><i id="trk" style="width:${pctOf(mine)}%"></i></div>` : `
-      <div class="tags"><span class="pill">${S.me.department || '—'}</span>
-        ${S.me.brand ? `<span class="pill pri">${S.me.brand}</span>` : ''}
-        ${S.shift && S.shift.location ? `<span class="pill">${S.shift.location}</span>` : ''}</div>`}
+  const c = clockParts();
+  return `<div class="card hero a-clock" id="hero">
+    <div class="lb">Thời gian hiện tại</div>
+    <div class="big" id="big">${c[0]}<span class="s">:</span>${c[1]}<span class="s">:</span>${c[2]}</div>
+    <div class="sub" id="heroSub">${dateLine()}</div>
+    <div class="tags"><span class="pill">${S.me.department || '—'}</span>
+      ${S.me.brand ? `<span class="pill pri">${S.me.brand}</span>` : ''}
+      ${S.shift && S.shift.location ? `<span class="pill">${S.shift.location}</span>` : ''}</div>
+  </div>`;
+}
+
+/* Ô đếm ngược hoạt động — luôn có mặt, đứng yên ở 00:00 khi không đi đâu.
+   Tách khỏi đồng hồ để không phải nhìn hai chỗ khác nhau tuỳ lúc. */
+function timerCard(mine, left, over) {
+  if (!mine) {
+    return `<div class="card hero a-timer idle" id="timer">
+      <div class="lb">Rời vị trí</div>
+      <div class="big" id="tbig">00<span class="s">:</span>00</div>
+      <div class="sub">Đang ở vị trí · chưa bấm đi đâu</div>
+      <div class="track"><i id="trk" style="width:0%"></i></div>
+    </div>`;
+  }
+  return `<div class="card hero a-timer run ${over ? 'over' : ''}" id="timer">
+    <div class="lb">${mine.type_name}</div>
+    <div class="big" id="tbig">${clk(left)}</div>
+    <div class="sub" id="tsub">${over
+      ? `Bắt đầu ${hhmm(mine.started_at)} · đã quá ${Math.floor(-left / 60)} phút`
+      : `Bắt đầu ${hhmm(mine.started_at)} · cho phép ${mine.limit_minutes} phút`}</div>
+    <div class="track"><i id="trk" style="width:${pctOf(mine)}%"></i></div>
   </div>`;
 }
 
@@ -339,7 +356,9 @@ function shiftCard() {
         ? `${sh.shift_start}–${sh.shift_end}${sh.ot ? ` +${sh.ot.hours}h` : ''} · giờ ${sh.location}`
         : 'hôm nay nghỉ'}</span></div>
     ${sh.has_shift && sh.must_be_in_by ? `<div class="offnote" style="padding:var(--s3) var(--s4) 0">
-      Phải có mặt trước <b>${hhmm(sh.must_be_in_by)}</b> — quá mốc này dù 1 phút cũng tính là trễ.
+      ${hhmm(sh.must_be_in_by) === sh.shift_start
+        ? `Lên ca đúng <b>${sh.shift_start}</b> — quá giờ dù 1 phút cũng tính là trễ, trễ bao nhiêu ghi bấy nhiêu.`
+        : `Phải có mặt trước <b>${hhmm(sh.must_be_in_by)}</b> — quá mốc này dù 1 phút cũng tính là trễ.`}
     </div>` : ''}
     <div style="padding:14px 18px 4px">${state}</div>
     ${sh.ot ? `<div class="offnote" style="padding:0 var(--s4) var(--s2)">
@@ -653,6 +672,7 @@ function render() {
       ${S.me.role === 'admin' ? '<a class="pill" href="/admin">Quản trị</a>' : ''}</div>
     <div class="alerts span-all">${rollCallCard()}${reportCard()}${soundCard()}${installCard()}</div>
     ${heroCard(d, mine, left, over)}
+    ${timerCard(mine, left, over)}
     ${shiftCard()}
     <div class="card a-acts">${depBlock(mine, locked)}${action}</div>
     <div class="card a-stats">
@@ -676,21 +696,32 @@ function render() {
 
 function tick() {
   if (!S) return;
-  const mine = S.current, big = $('#big'), hero = $('#hero'), trk = $('#trk');
+  const mine = S.current;
+
+  // Đồng hồ luôn chạy giờ hiện tại
+  const big = $('#big');
   if (big) {
+    const c = clockParts();
+    big.innerHTML = `${c[0]}<span class="s">:</span>${c[1]}<span class="s">:</span>${c[2]}`;
+  }
+
+  // Ô đếm ngược hoạt động
+  const tbig = $('#tbig'), timer = $('#timer'), trk = $('#trk');
+  if (tbig) {
     if (mine) {
       const l = leftOf(mine);
-      big.textContent = clk(l);
-      hero.classList.toggle('over', l < 0);
-      // Hết giờ hoạt động -> báo động, dừng khi bấm Dừng lại
+      tbig.textContent = clk(l);
+      if (timer) timer.classList.toggle('over', l < 0);
+      if (trk) trk.style.width = pctOf(mine) + '%';
+      const ts = $('#tsub');
+      if (ts) ts.textContent = l < 0
+        ? `Bắt đầu ${hhmm(mine.started_at)} · đã quá ${Math.floor(-l / 60)} phút`
+        : `Bắt đầu ${hhmm(mine.started_at)} · cho phép ${mine.limit_minutes} phút`;
       if (l < 0 && !S.rollcall) Alarm.start('overtime');
       else if (l >= 0 && Alarm.kind === 'overtime') Alarm.stop();
-      if (trk) trk.style.width = pctOf(mine) + '%';
-      const sub = $('#heroSub');
-      if (sub && l < 0) sub.textContent = `Bắt đầu ${hhmm(mine.started_at)} · đã quá ${Math.floor(-l / 60)} phút`;
     } else {
-      const c = clockParts();
-      big.innerHTML = `${c[0]}<span class="s">:</span>${c[1]}<span class="s">:</span>${c[2]}`;
+      tbig.innerHTML = '00<span class="s">:</span>00';
+      if (trk) trk.style.width = '0%';
       if (Alarm.kind === 'overtime') Alarm.stop();
     }
   }
