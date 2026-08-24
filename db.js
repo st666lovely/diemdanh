@@ -134,6 +134,7 @@ CREATE TABLE IF NOT EXISTS roll_calls (
   is_makeup     INTEGER NOT NULL DEFAULT 0,-- lượt bù sau khi rời vị trí
   defer_reason  TEXT,
   ip            TEXT,
+  source        TEXT    NOT NULL DEFAULT 'auto',   -- auto | manual
   created_at    INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_rc_user   ON roll_calls(user_id, day);
@@ -182,6 +183,11 @@ CREATE TABLE IF NOT EXISTS report_exempt (
   if (!cols.includes('default_end'))   db.exec('ALTER TABLE users ADD COLUMN default_end TEXT');
   // Độ dài ca của từng người — file lịch chỉ ghi GIỜ VÀO, giờ ra = giờ vào + số này
   if (!cols.includes('shift_hours')) db.exec('ALTER TABLE users ADD COLUMN shift_hours REAL NOT NULL DEFAULT 8');
+
+  const rc = db.prepare('PRAGMA table_info(roll_calls)').all().map((c) => c.name);
+  if (rc.length && !rc.includes('source')) {
+    db.exec("ALTER TABLE roll_calls ADD COLUMN source TEXT NOT NULL DEFAULT 'auto'");
+  }
 
   const oc = db.prepare('PRAGMA table_info(day_offs)').all().map((c) => c.name);
   if (!oc.includes('brand'))      db.exec('ALTER TABLE day_offs ADD COLUMN brand TEXT');
@@ -792,7 +798,9 @@ function rollCallByDay(userId, f = {}) {
             SUM(CASE WHEN r.status='done'      THEN 1 ELSE 0 END) da_diem_danh,
             SUM(CASE WHEN r.status='missed'    THEN 1 ELSE 0 END) vang,
             SUM(CASE WHEN r.is_makeup=1        THEN 1 ELSE 0 END) luot_bu,
-            SUM(CASE WHEN r.status='cancelled' THEN 1 ELSE 0 END) da_huy
+            SUM(CASE WHEN r.status='cancelled' THEN 1 ELSE 0 END) da_huy,
+            SUM(CASE WHEN r.source='manual' THEN 1 ELSE 0 END) thu_cong,
+            SUM(CASE WHEN r.source='manual' AND r.status='missed' THEN 1 ELSE 0 END) vang_thu_cong
      FROM roll_calls r WHERE ${w.join(' AND ')}
      GROUP BY r.day ORDER BY r.day DESC LIMIT 60`).all(...p);
 
@@ -1304,7 +1312,8 @@ function activeRollCall(userId) {
   const t = now();
   const rc = db.prepare(
     `SELECT * FROM roll_calls WHERE user_id=? AND status='pending'
-     AND due_at IS NOT NULL AND due_at<=? AND deadline_at>=? ORDER BY due_at LIMIT 1`
+     AND due_at IS NOT NULL AND due_at<=? AND deadline_at>=?
+     ORDER BY (source='manual') DESC, due_at LIMIT 1`
   ).get(userId, t, t);
   if (!rc) return null;
 
@@ -1345,8 +1354,8 @@ function fireRollCall({ who = 'all', windowMin = RC_WINDOW_MIN, scope = null } =
   }
 
   const ins = db.prepare(`INSERT INTO roll_calls
-    (user_id,brand,department,day,due_at,deadline_at,status,is_makeup,defer_reason,created_at)
-    VALUES (?,?,?,?,?,?, 'pending', 0, ?, ?)`);
+    (user_id,brand,department,day,due_at,deadline_at,status,is_makeup,defer_reason,source,created_at)
+    VALUES (?,?,?,?,?,?, 'pending', 0, ?, 'manual', ?)`);
 
   const fired = [], skipped = [];
   db.transaction(() => {
@@ -1354,16 +1363,9 @@ function fireRollCall({ who = 'all', windowMin = RC_WINDOW_MIN, scope = null } =
       const w = shiftWindow(u, t).filter((c) => t >= c.start && t <= c.end);
       if (!w.length) { skipped.push(u.name); continue; }        // không trong ca
       if (hasCheckedOut(u)) { skipped.push(u.name + ' (đã xuống ca)'); continue; }
-      const đangĐi = openFor(u.id);
-      if (đangĐi) {
-        skipped.push(u.name + ' (đang ' + ((typeByCode(đangĐi.type_code) || {}).name || 'rời vị trí') + ')');
-        continue;
-      }
-      // Đang có lượt chờ rồi thì thôi, khỏi chồng lượt
-      const đangCó = db.prepare(
-        "SELECT 1 FROM roll_calls WHERE user_id=? AND status='pending' AND deadline_at>=?"
-      ).get(u.id, t);
-      if (đangCó) { skipped.push(u.name + ' (đang có lượt chờ)'); continue; }
+      // KHÔNG chặn gì thêm. Đây là quyền kiểm tra đột xuất của quản lý:
+      // vừa điểm danh xong, sắp tới lượt tự động, hay đang có lượt chờ —
+      // đều phải xác nhận lại. Chỉ người không có ca hoặc đã xuống ca mới bỏ qua.
 
       ins.run(u.id, u.brand, u.department, w[0].day, t, t + windowMin * 60000,
               'Quản trị bắn thủ công', t);
@@ -1377,7 +1379,11 @@ function fireRollCall({ who = 'all', windowMin = RC_WINDOW_MIN, scope = null } =
     message: fired.length
       ? `Đã bắn cho ${fired.length} người: ${fired.slice(0, 6).join(', ')}`
         + (fired.length > 6 ? '…' : '') + `. Phải xác nhận trong ${windowMin} phút.`
-      : 'Không có ai đang trong ca theo lịch. Kiểm tra đã nhập lịch ca tháng này chưa.',
+      // Nói rõ vì sao không bắn được cho ai, thay vì đổ hết cho "chưa nhập lịch"
+      : (skipped.length
+          ? `Không bắn cho ai. Lý do: ${skipped.slice(0, 8).join(' · ')}`
+            + (skipped.length > 8 ? '…' : '') + '.'
+          : 'Không có nhân viên nào đang hoạt động trong phạm vi này.'),
   };
 }
 
@@ -1405,6 +1411,7 @@ function upcomingRollCalls(scope = null, limit = 40) {
       department: r.department, brand: r.brand, day: r.day,
       due_at: r.due_at, deadline_at: r.deadline_at,
       is_makeup: !!r.is_makeup, defer_reason: r.defer_reason,
+      source: r.source || 'auto',
       state,
       in_seconds: r.due_at ? Math.round((r.due_at - t) / 1000) : null,
     };
@@ -1429,7 +1436,9 @@ function rollCallReport(f = {}, scope = null) {
             SUM(CASE WHEN r.status='missed'   THEN 1 ELSE 0 END) vang,
             SUM(CASE WHEN r.is_makeup=1       THEN 1 ELSE 0 END) luot_bu,
             SUM(CASE WHEN r.status IN ('pending','waiting') THEN 1 ELSE 0 END) dang_cho,
-            SUM(CASE WHEN r.status='cancelled' THEN 1 ELSE 0 END) da_huy
+            SUM(CASE WHEN r.status='cancelled' THEN 1 ELSE 0 END) da_huy,
+            SUM(CASE WHEN r.source='manual' THEN 1 ELSE 0 END) thu_cong,
+            SUM(CASE WHEN r.source='manual' AND r.status='missed' THEN 1 ELSE 0 END) vang_thu_cong
      FROM roll_calls r JOIN users u ON u.id=r.user_id
      ${where} GROUP BY u.id, r.department, r.brand
      ORDER BY vang DESC, tong DESC`).all(...p);
