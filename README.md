@@ -198,44 +198,18 @@ Ca thay đổi từng ngày nên không dùng một khung giờ cố định. Qu
 | 9F2K7QX3 | Nguyễn Thu Hà | VN | CS | AE | 52560 | 2026-07 | 08:00-16:00 | 08:00-16:00 | … | OFF | OFF | … |
 
 - **Ma** là mã 8 ký tự trong link vào ca. Không có cột này thì khớp theo **Ten** (phải trùng khớp tuyệt đối).
-- Ô ghi được **hai kiểu**: đủ giờ vào–kết ca `HH:mm-HH:mm` (chấp nhận `12h00-22h00`), hoặc **chỉ một mốc giờ**
-  vào ca như `07:00` — hệ thống tự suy giờ kết ca theo **Ca mặc định** của người đó (xem bên dưới).
-  Để trống hoặc `OFF` / `Nghỉ` = ngày nghỉ.
-- Ca qua đêm (`22:00-06:00`, hay `22:00` với ca mặc định 10 tiếng) tự hiểu là kết thúc vào ngày hôm sau.
+- Ô ghi `HH:mm-HH:mm` (chấp nhận `12h00-22h00`); để trống hoặc `OFF` / `Nghỉ` = ngày nghỉ.
+- Ca qua đêm (`22:00-06:00`) tự hiểu là kết thúc vào ngày hôm sau.
 - Ngày không có lịch thì bấm chấm công vẫn ghi nhận nhưng **không tính trễ**.
 - **MaCaNhan** do quản lý tự đặt (4–32 ký tự, không khoảng trắng), **ThangLuong** dạng `2026-07`.
   Để trống hai cột này thì giữ nguyên mã cũ. Hệ thống băm ngay khi nhận, không lưu bản gốc.
   **Định dạng cột MaCaNhan thành Text trong Excel**, nếu không Excel cắt mất số 0 đầu.
-
-### Chỉ ghi một mốc giờ vào ca
-
-Nhiều nơi lịch chính chỉ ghi giờ vào ca — nhân viên tự hiểu mình là nhân viên 8 tiếng hay 10 tiếng.
-Trạm trực hỗ trợ đúng kiểu này: ô lịch chỉ cần ghi `07:00` (không cần gạch nối), hệ thống tự cộng thêm
-số giờ ca mặc định của người đó để ra giờ kết ca — không cần gõ đủ khung giờ cho từng người từng ngày.
-
-Số giờ ca mặc định (**Ca mặc định**, ví dụ 8 hoặc 10 tiếng) đặt cố định cho từng người ở tab **Nhân sự**,
-đổi được bất cứ lúc nào qua cột "Ca mặc định". Người mới thêm mặc định 8 tiếng.
-
-Hai kiểu ghi dùng chung được trong cùng một file, tuỳ ngày: ngày nào cần khung giờ riêng (VD ca nửa buổi,
-tăng ca có kế hoạch) thì vẫn ghi đủ `HH:mm-HH:mm` như cũ; ngày nào theo ca chuẩn thì chỉ cần ghi một mốc giờ.
-
-Màn **Xem trước** báo trước số ô sẽ được tự suy giờ kết ca trước khi Merge/Ghi đè, để kiểm tra lại nếu cần.
 
 Ba nút: **Xem trước** (đối chiếu, chưa ghi gì), **Merge** (chỉ đụng người có trong file),
 **Ghi đè tháng** (xoá sạch lịch tháng đó của mọi người rồi ghi lại).
 
 Cùng định dạng với bot điểm danh Telegram, chỉ khác cột định danh: bot dùng `TelegramID`,
 ở đây dùng `Ma`. Thêm một cột là dùng chung được một file cho cả hai.
-
-## OT đột xuất
-
-Khi một người được yêu cầu OT ngoài kế hoạch (không nằm trong lịch tháng đã nhập), quản trị gán ở tab **OT**:
-chọn nhân viên, chọn ngày, ghi chú lý do (tuỳ chọn), bấm **Gán OT**. Xem lại/bỏ theo tháng ngay trong tab đó.
-
-- **Chỉ quản trị gán được** — nhân viên không tự bấm, tránh khai khống.
-- **Thuần ghi nhận để theo dõi** — OT không cộng thêm giờ vào ca chính, không đổi giờ tan ca, không ảnh hưởng
-  cách tính trễ lên/xuống ca. Muốn đổi giờ ca thật sự thì sửa trực tiếp trong lịch tháng (tab Nhân sự).
-- Nhân viên thấy nhãn "⚡ OT hôm nay" trên trang của mình vào đúng ngày được gán, kèm ghi chú nếu có.
 
 ## Nghỉ phép: nguyện vọng và lịch chính thức
 

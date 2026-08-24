@@ -3,10 +3,7 @@
 /* Đọc file lịch tháng dạng bảng: 1 dòng/người, mỗi ngày trong tháng 1 cột.
    Giữ nguyên quy tắc của bot Telegram đang chạy để hai bên dùng chung được một file:
      Ma/Ten/KhuVuc | 1 | 2 | 3 | ... | 31
-   Ô ghi "HH:mm-HH:mm" (chấp nhận "12h00-22h00") để có đủ giờ vào/kết ca.
-   Ô chỉ ghi MỘT mốc giờ (VD "07:00") = giờ vào ca; giờ kết ca suy ra tự động
-   theo số giờ ca mặc định của từng người (đặt ở tab Nhân sự, VD 8 hoặc 10 tiếng).
-   Để trống hoặc OFF/Nghỉ = ngày nghỉ. */
+   Ô ghi "HH:mm-HH:mm" (chấp nhận "12h00-22h00"), để trống hoặc OFF/Nghỉ = ngày nghỉ. */
 
 const XLSX = require('xlsx');
 
@@ -33,44 +30,23 @@ function norm(h) {
     .replace(/\s+/g, '');
 }
 
-/* Một ô giờ ca -> { off } | { start, end } | { singleStart } | null (lỗi định dạng)
-   { singleStart } nghĩa là ô chỉ ghi MỘT mốc giờ vào ca (VD "07:00" = ca 8 tiếng,
-   "10:00" = ca 10 tiếng) — giờ kết ca sẽ suy ra sau, theo số giờ ca mặc định của
-   từng người (cột shift_hours ở tab Nhân sự), lúc áp lịch vào hệ thống. */
+/* Một ô giờ ca -> { off } | { start, end } | null (lỗi định dạng) */
 function parseCell(raw) {
-  // Excel tự đổi ô "07:00" thành số thập phân (time serial, phần của 1 ngày)
-  // khi ô chỉ ghi một mốc giờ, không có dấu gạch nối.
-  if (typeof raw === 'number') {
-    if (raw < 0 || raw >= 1) return null;   // không phải giờ trong ngày (VD lẫn cả ngày tháng)
-    const totalMin = Math.round(raw * 24 * 60) % 1440;
-    const hh = String(Math.floor(totalMin / 60)).padStart(2, '0');
-    const mm = String(totalMin % 60).padStart(2, '0');
-    return { singleStart: `${hh}:${mm}` };
-  }
+  // Excel tự đổi ô "12:00" thành số thập phân khi thiếu dấu gạch nối
+  if (typeof raw === 'number') return { singleTimeOnly: true };
 
   const str = String(raw ?? '').trim();
   if (!str) return { off: true };
   if (OFF_TOKENS.has(norm(str))) return { off: true };
 
-  const norm2 = str.replace(/h/gi, ':');
+  const m = str.replace(/h/gi, ':').match(/^(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})$/);
+  if (!m) return null;
 
-  const range = norm2.match(/^(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})$/);
-  if (range) {
-    const hh = (a, b) => `${a.padStart(2, '0')}:${b}`;
-    const start = hh(range[1], range[2]);
-    const end = hh(range[3], range[4]);
-    if (+range[1] > 23 || +range[3] > 23 || +range[2] > 59 || +range[4] > 59) return null;
-    return { start, end };
-  }
-
-  // Chỉ ghi 1 mốc giờ vào ca, ví dụ "07:00" hoặc "07h00"
-  const single = norm2.match(/^(\d{1,2}):(\d{2})$/);
-  if (single) {
-    if (+single[1] > 23 || +single[2] > 59) return null;
-    return { singleStart: `${single[1].padStart(2, '0')}:${single[2]}` };
-  }
-
-  return null;
+  const hh = (a, b) => `${a.padStart(2, '0')}:${b}`;
+  const start = hh(m[1], m[2]);
+  const end = hh(m[3], m[4]);
+  if (+m[1] > 23 || +m[3] > 23 || +m[2] > 59 || +m[4] > 59) return null;
+  return { start, end };
 }
 
 /**
@@ -154,12 +130,11 @@ function parseScheduleFile(buffer, ym) {
         errors.push(`${who}, ngày ${day}: giờ "${row[index]}" không đọc được, đã coi là nghỉ.`);
         return;
       }
+      if (parsed.singleTimeOnly) {
+        errors.push(`${who}, ngày ${day}: ô chỉ có 1 mốc giờ (Excel tự đổi định dạng) — cần dạng "HH:mm-HH:mm", đã coi là nghỉ.`);
+        return;
+      }
       if (parsed.off) return;   // nghỉ: không ghi dòng nào
-
-      // Chỉ ghi 1 mốc giờ vào ca — giờ kết ca sẽ suy ra theo số giờ ca mặc định
-      // của từng người khi áp lịch (applySchedule), vì lúc đọc file chưa biết
-      // người này là nhân viên mấy tiếng.
-      if (parsed.singleStart) { rec.days[dayStr] = { singleStart: parsed.singleStart }; return; }
 
       rec.days[dayStr] = { start: parsed.start, end: parsed.end };
     });

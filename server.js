@@ -175,8 +175,6 @@ app.get('/api/state', requireUser, (req, res) => {
     shift: D.shiftToday(req.user),
     offs: D.myOffs(req.user, ym),
     schedule: D.scheduleOf(req.user.id, ym),
-    ot_today: D.otToday(req.user),
-    ot_days: D.otOf(req.user.id, ym).map((o) => o.day),
     key: { required: D.hasPersonalKey(req.user), month: req.user.key_month || null },
     rollcall: (() => {
       const rc = D.activeRollCall(req.user.id);
@@ -283,20 +281,17 @@ app.post('/api/admin/users', requireUser, requireAdmin, (req, res) => {
     return res.status(400).json({ ok: false, message: 'Chọn brand cho nhân viên này.' });
   }
 
-  const shiftHours = Number.isInteger(+b.shift_hours) && +b.shift_hours >= D.SHIFT_HOURS_MIN && +b.shift_hours <= D.SHIFT_HOURS_MAX
-    ? +b.shift_hours : 8;
-
   const key = D.newKey();
-  D.db.prepare(`INSERT INTO users (name,key,department,brand,role,shift_hours,created_at)
-                VALUES (?,?,?,?,'staff',?,?)`).run(name, key, b.department, brand, shiftHours, Date.now());
+  D.db.prepare(`INSERT INTO users (name,key,department,brand,role,created_at)
+                VALUES (?,?,?,?,'staff',?)`).run(name, key, b.department, brand, Date.now());
   D.audit(req.user, 'user_create', `${name} (${brand})`, req.ip);
   res.json({ ok: true, message: `Đã thêm ${name} vào ${brand}.`, users: D.allUsers(req.scope) });
 });
 
 app.post('/api/admin/users/bulk', requireUser, requireAdmin, (req, res) => {
   const text = String((req.body || {}).text || '');
-  const ins = D.db.prepare(`INSERT INTO users (name,key,department,brand,role,shift_hours,created_at)
-                            VALUES (?,?,?,?,'staff',?,?)`);
+  const ins = D.db.prepare(`INSERT INTO users (name,key,department,brand,role,created_at)
+                            VALUES (?,?,?,?,'staff',?)`);
   const created = [], skipped = [];
 
   D.db.transaction(() => {
@@ -308,8 +303,7 @@ app.post('/api/admin/users/bulk', requireUser, requireAdmin, (req, res) => {
       if (req.scope !== null) brand = req.scope;   // admin theo brand chỉ thêm được người của brand mình
       if (!dept) { skipped.push(`${p[0]} — bộ phận không hợp lệ`); continue; }
       if (!brand) { skipped.push(`${p[0]} — thiếu brand`); continue; }
-      const hours = Number.isInteger(+p[3]) && +p[3] >= D.SHIFT_HOURS_MIN && +p[3] <= D.SHIFT_HOURS_MAX ? +p[3] : 8;
-      ins.run(p[0], D.newKey(), dept, brand, hours, Date.now());
+      ins.run(p[0], D.newKey(), dept, brand, Date.now());
       created.push(p[0]);
     }
   })();
@@ -339,18 +333,6 @@ app.put('/api/admin/users/:id', requireUser, requireAdmin, (req, res) => {
   res.json({ ok: true, message: 'Đã cập nhật.', users: D.allUsers(req.scope) });
 });
 
-/* Số giờ ca mặc định (8, 10...) — dùng để suy giờ kết ca khi file lịch chỉ ghi 1 mốc giờ */
-app.put('/api/admin/users/:id/shift-hours', requireUser, requireAdmin, (req, res) => {
-  const u = targetUser(req, res); if (!u) return;
-  try {
-    const h = D.setShiftHours(u.id, (req.body || {}).hours);
-    D.audit(req.user, 'shift_hours_update', `${u.name} -> ${h}h`, req.ip);
-    res.json({ ok: true, message: `Đã đặt ca mặc định ${h} tiếng cho ${u.name}.`, users: D.allUsers(req.scope) });
-  } catch (e) {
-    res.status(400).json({ ok: false, message: e.message });
-  }
-});
-
 /* Đặt mã cá nhân (lấy từ lương tháng trước). Chỉ nhận, băm rồi quên số gốc. */
 app.post('/api/admin/users/:id/personal-key', requireUser, requireAdmin, (req, res) => {
   const u = targetUser(req, res); if (!u) return;
@@ -358,6 +340,78 @@ app.post('/api/admin/users/:id/personal-key', requireUser, requireAdmin, (req, r
   const r = D.setPersonalKey(u.id, b.key, b.month);
   if (r.ok) D.audit(req.user, 'personal_key_set', `${u.name} (${b.month || '-'})`, req.ip);
   res.status(r.ok ? 200 : 400).json({ ...r, users: D.allUsers(req.scope) });
+});
+
+/* --- Giờ ca mặc định --- */
+app.put('/api/admin/users/:id/default-shift', requireUser, requireAdmin, (req, res) => {
+  const u = targetUser(req, res); if (!u) return;
+  const b = req.body || {};
+  const r = D.setDefaultShift(u.id, b.start, b.end);
+  if (r.ok) D.audit(req.user, 'default_shift', `${u.name} ${b.start}-${b.end}`, req.ip);
+  res.status(r.ok ? 200 : 400).json({ ...r, users: D.allUsers(req.scope) });
+});
+
+app.post('/api/admin/default-shift/bulk', requireUser, requireAdmin, (req, res) => {
+  const b = req.body || {};
+  const r = D.setDefaultShiftBulk(b.department || null, b.brand || null, b.start, b.end, req.scope);
+  if (r.ok) D.audit(req.user, 'default_shift_bulk', `${b.department || 'tất cả'} ${b.start}-${b.end}`, req.ip);
+  res.status(r.ok ? 200 : 400).json({ ...r, users: D.allUsers(req.scope) });
+});
+
+/* --- Làm thêm giờ --- */
+app.post('/api/ot', requireUser, requireKey, (req, res) => {
+  const b = req.body || {};
+  const r = D.setOT(req.user, b.hours, b.reason, false);
+  if (r.ok) D.audit(req.user, 'ot_set', `${b.hours}h · ${b.reason || ''}`, req.ip);
+  res.status(r.ok ? 200 : 400).json({ ...r, shift: D.shiftToday(req.user) });
+});
+
+app.delete('/api/ot', requireUser, requireKey, (req, res) => {
+  const day = D.todayOf(req.user);
+  const r = D.clearOT(req.user.id, day);
+  D.audit(req.user, 'ot_clear', day, req.ip);
+  res.json({ ...r, shift: D.shiftToday(req.user) });
+});
+
+app.post('/api/admin/ot', requireUser, requireAdmin, (req, res) => {
+  const b = req.body || {};
+  const u = D.db.prepare('SELECT * FROM users WHERE id=?').get(+b.user_id);
+  if (!u || !D.inScope(req.scope, u.brand)) {
+    return res.status(404).json({ ok: false, message: 'Không tìm thấy nhân viên.' });
+  }
+  const r = b.clear
+    ? D.clearOT(u.id, String(b.day))
+    : D.setOT(u, b.hours, b.reason || 'Quản trị ghi nhận', true, b.day || null);
+  D.audit(req.user, b.clear ? 'ot_clear' : 'ot_set_admin', `${u.name} ${b.day || ''}`, req.ip);
+  res.status(r.ok ? 200 : 400).json(r);
+});
+
+/* --- Nhật ký vào/ra ca --- */
+app.get('/api/admin/shift-log', requireUser, requireAdmin, (req, res) => {
+  res.json({
+    ...D.shiftLog(req.query, req.scope),
+    users: D.allUsers(req.scope).filter((u) => u.role === 'staff'),
+    departments: D.DEPTS,
+    brands: req.scope ? [req.scope] : D.BRANDS,
+    early_min: D.SHIFT_EARLY_MIN,
+  });
+});
+
+/* --- Xem lượt chi tiết theo ngày --- */
+app.get('/api/admin/rollcalls/detail', requireUser, requireAdmin, (req, res) => {
+  const u = D.db.prepare('SELECT * FROM users WHERE id=?').get(+req.query.user_id);
+  if (!u || !D.inScope(req.scope, u.brand)) {
+    return res.status(404).json({ ok: false, message: 'Không tìm thấy nhân viên.' });
+  }
+  res.json({ user: { id: u.id, name: u.name, emp_code: u.emp_code }, ...D.rollCallByDay(u.id, req.query) });
+});
+
+app.get('/api/admin/activities/detail', requireUser, requireAdmin, (req, res) => {
+  const u = D.db.prepare('SELECT * FROM users WHERE id=?').get(+req.query.user_id);
+  if (!u || !D.inScope(req.scope, u.brand)) {
+    return res.status(404).json({ ok: false, message: 'Không tìm thấy nhân viên.' });
+  }
+  res.json({ user: { id: u.id, name: u.name, emp_code: u.emp_code }, ...D.activityByDay(u.id, req.query) });
 });
 
 /* Bắn điểm danh thủ công */
@@ -468,37 +522,17 @@ app.post('/api/admin/reports/exempt', requireUser, requireAdmin, (req, res) => {
   res.json(r);
 });
 
-/* Báo cáo điểm danh.
-   Mặc định trả bảng TỔNG HỢP THEO NGƯỜI. Thêm ?detail=1&user_id=... để xem
-   nhật ký từng lượt của một người — dùng cho nút "Xem lượt". */
+/* Báo cáo điểm danh */
 app.get('/api/admin/rollcalls', requireUser, requireAdmin, (req, res) => {
   D.sweepRollCalls();
-  const detail = req.query.detail === '1';
   res.json({
-    detail,
-    ...(detail ? D.rollCallDetail(req.query, req.scope) : D.rollCallReport(req.query, req.scope)),
-    upcoming: detail ? [] : D.upcomingRollCalls(req.scope),
+    ...D.rollCallReport(req.query, req.scope),
+    upcoming: D.upcomingRollCalls(req.scope),
     server_time: Date.now(),
     users: D.allUsers(req.scope).filter((u) => u.role === 'staff'),
     departments: D.DEPTS,
     brands: req.scope ? [req.scope] : D.BRANDS,
     config: { per_shift: D.RC_PER_SHIFT, window_min: D.RC_WINDOW_MIN, makeup_min: D.RC_MAKEUP_MIN },
-  });
-});
-
-/* Đi lố hoạt động THEO NGƯỜI — cùng kiểu với /api/late, dùng cho tab Theo dõi.
-   Thêm ?detail=1&user_id=... để xem từng lượt lố của một người. */
-app.get('/api/admin/overlimit', requireUser, requireAdmin, (req, res) => {
-  const detail = req.query.detail === '1';
-  res.json({
-    detail,
-    ...(detail
-      ? D.history({ ...req.query, only: 'over' }, req.scope)
-      : D.overLimitByUser(req.query, req.scope)),
-    types: D.types(),
-    departments: D.DEPTS,
-    brands: req.scope ? [req.scope] : D.BRANDS,
-    users: D.allUsers(req.scope).filter((u) => u.role === 'staff'),
   });
 });
 
@@ -873,12 +907,8 @@ app.post('/api/admin/schedule/import',
 
       const dayCount = parsed.rows.reduce((n, r) => n + Object.keys(r.days).length, 0);
       const keyCount = parsed.rows.filter((r) => r.personal_key).length;
-      // Số ô chỉ ghi 1 mốc giờ — giờ kết ca sẽ suy theo số giờ ca mặc định của từng người
-      const singleCount = parsed.rows.reduce(
-        (n, r) => n + Object.values(r.days).filter((d) => d.singleStart).length, 0
-      );
       return res.json({
-        ok: true, preview: true, ym: parsed.ym, count: parsed.count, dayCount, keyCount, singleCount,
+        ok: true, preview: true, ym: parsed.ym, count: parsed.count, dayCount, keyCount,
         matched: names.filter((n) => !missing.includes(n)), missing, errors: parsed.errors,
       });
     }
@@ -901,36 +931,6 @@ app.get('/api/admin/schedule', requireUser, requireAdmin, (req, res) => {
   const out = D.scheduleSummary(ym, req.scope);
   if (req.query.user_id) out.detail = D.scheduleOf(+req.query.user_id, ym);
   res.json(out);
-});
-
-/* ============================================================
-   OT ĐỘT XUẤT — chỉ quản trị gán, thuần ghi nhận để theo dõi,
-   KHÔNG đụng đến giờ ca chính hay cách tính trễ.
-   ============================================================ */
-app.get('/api/admin/ot', requireUser, requireAdmin, (req, res) => {
-  const ym = String(req.query.ym || new Date().toISOString().slice(0, 7));
-  res.json({ ok: true, ym, rows: D.otSummary(ym, req.scope) });
-});
-
-app.post('/api/admin/ot', requireUser, requireAdmin, (req, res) => {
-  const b = req.body || {};
-  const u = targetUser({ ...req, params: { id: b.user_id } }, res); if (!u) return;
-  const day = String(b.day || '').trim();
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return res.status(400).json({ ok: false, message: 'Ngày không hợp lệ (YYYY-MM-DD).' });
-
-  D.setOT(u.id, day, String(b.note || '').trim().slice(0, 200), req.user.name);
-  D.audit(req.user, 'ot_set', `${u.name} ${day}`, req.ip);
-  res.json({ ok: true, message: `Đã gán OT cho ${u.name} ngày ${day}.`, rows: D.otSummary(day.slice(0, 7), req.scope) });
-});
-
-app.delete('/api/admin/ot', requireUser, requireAdmin, (req, res) => {
-  const b = req.body || {};
-  const u = targetUser({ ...req, params: { id: b.user_id } }, res); if (!u) return;
-  const day = String(b.day || '').trim();
-
-  D.clearOT(u.id, day);
-  D.audit(req.user, 'ot_clear', `${u.name} ${day}`, req.ip);
-  res.json({ ok: true, message: `Đã bỏ OT của ${u.name} ngày ${day}.`, rows: D.otSummary(day.slice(0, 7), req.scope) });
 });
 
 /* --- Đổi khu vực (múi giờ) của nhân viên --- */

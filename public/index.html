@@ -204,7 +204,7 @@ function showGate(kind) {
   $('#app').hidden = true; $('#gate').hidden = false;
   $('#gate').innerHTML = `<div class="card">
     <div class="ic">${g.ic}</div><h1>${g.h}</h1><p>${g.p}</p>
-    <p style="margin-top:22px;font-size:13px;color:var(--tx3)">Bạn là quản lý?
+    <p style="margin-top:22px;font-size:13px;color:var(--tx-3)">Bạn là quản lý?
       <a href="/admin" style="color:var(--pri);font-weight:600">Đăng nhập tại đây</a></p></div>`;
 }
 
@@ -316,7 +316,7 @@ function heroCard(d, mine, left, over) {
     <div class="sub" id="heroSub">${mine
       ? `Bắt đầu ${hhmm(mine.started_at)} · cho phép ${mine.limit_minutes} phút`
       : dateLine()}</div>
-    ${mine ? `<div class="bar-track"><i id="trk" style="width:${pctOf(mine)}%"></i></div>` : `
+    ${mine ? `<div class="track"><i id="trk" style="width:${pctOf(mine)}%"></i></div>` : `
       <div class="tags"><span class="pill">${S.me.department || '—'}</span>
         ${S.me.brand ? `<span class="pill pri">${S.me.brand}</span>` : ''}
         ${S.shift && S.shift.location ? `<span class="pill">${S.shift.location}</span>` : ''}</div>`}
@@ -335,16 +335,29 @@ function shiftCard() {
 
   return `<div class="card">
     <div class="card-h"><span class="t">Ca hôm nay</span>
-      <span class="r">${sh.has_shift ? `${sh.shift_start}–${sh.shift_end} · giờ ${sh.location}`
+      <span class="r">${sh.has_shift
+        ? `${sh.shift_start}–${sh.shift_end}${sh.ot ? ` +${sh.ot.hours}h` : ''} · giờ ${sh.location}`
         : 'hôm nay nghỉ'}</span></div>
-    <div style="padding:14px 18px 4px">${state}
-      ${S.ot_today ? `<span class="pill amb" style="margin-left:6px" title="${S.ot_today.note ? esc(S.ot_today.note) : 'OT đột xuất do quản trị gán'}">⚡ OT hôm nay</span>` : ''}</div>
+    ${sh.has_shift && sh.must_be_in_by ? `<div class="offnote" style="padding:var(--s3) var(--s4) 0">
+      Phải có mặt trước <b>${hhmm(sh.must_be_in_by)}</b> — quá mốc này dù 1 phút cũng tính là trễ.
+    </div>` : ''}
+    <div style="padding:14px 18px 4px">${state}</div>
+    ${sh.ot ? `<div class="offnote" style="padding:0 var(--s4) var(--s2)">
+      <span class="pill amb">OT +${sh.ot.hours} giờ</span>
+      <span class="sub"> ${esc(sh.ot.reason || '')}</span>
+      <button class="btn btn-sm" style="margin-left:var(--s2)" onclick="clearOT()">Bỏ OT</button>
+    </div>` : ''}
     <div class="punch two">
       <button class="pbtn ${sh.on_shift ? '' : 'go'}" ${sh.on_shift ? 'disabled' : ''}
         onclick="punch('in')"><span class="k">Bắt đầu</span>Lên ca</button>
       <button class="pbtn ${sh.on_shift ? 'go' : ''}" ${sh.on_shift ? '' : 'disabled'}
         onclick="punch('out')"><span class="k">Kết thúc</span>Xuống ca</button>
     </div>
+    ${sh.has_shift && !sh.ot ? `<div style="padding:0 var(--s4) var(--s4)">
+      <button class="btn btn-block" onclick="addOT()">Hôm nay có OT</button>
+      <div class="sub" style="margin-top:6px;text-align:center">
+        Bấm khi được yêu cầu làm thêm — ca sẽ kéo dài, xuống ca muộn không bị tính trễ.</div>
+    </div>` : ''}
     ${sh.rows.length ? `<div class="log">${sh.rows.slice().reverse().map(r => `
       <div class="r"><span class="t">${hhmm(r.actual_at)}</span>
         <span class="n">${r.kind_label}</span>
@@ -449,7 +462,7 @@ function soundCard() {
   const cần = !Alarm.unlocked
     || (('Notification' in window) && Notification.permission !== 'granted');
   if (!cần) return '';
-  return `<div class="card snd">
+  return `<div class="card note-card warn">
     <div class="ic">🔔</div>
     <div class="m">
       <div class="a">Bật âm báo cho ca này</div>
@@ -476,7 +489,7 @@ async function turnOnSound() {
 function installCard() {
   if (isStandalone) return '';
   if (localStorage.getItem('tt_hide_install') === '1') return '';
-  return `<div class="card install">
+  return `<div class="card note-card good">
     <div class="ic">⌂</div>
     <div class="m">
       <div class="a">Cài lên màn hình chính</div>
@@ -496,7 +509,7 @@ function rollCallCard() {
   const rc = S.rollcall;
   if (!rc) return '';
   const left = Math.max(0, Math.round((rc.deadline_at - nowMs()) / 1000));
-  return `<div class="card rc">
+  return `<div class="card note-card danger">
     <div class="m">
       <div class="a">${rc.is_makeup ? 'Điểm danh bù' : 'Điểm danh'}</div>
       <div class="b">${rc.is_makeup
@@ -536,7 +549,7 @@ function reportCard() {
     if (!t || !t.rows) return '';
     const chiTiet = Object.entries(t.sources || {})
       .map(([k, v]) => `${k}: ${v}`).join(' · ');
-    return `<div class="card rep ok">
+    return `<div class="card note-card good">
       <div class="ic">✓</div>
       <div class="m"><div class="a">Báo cáo hôm nay: ${t.rows} dòng</div>
         <div class="b">${chiTiet || 'Mã của bạn: <b>' + REP.emp_code + '</b>'}</div></div>
@@ -545,7 +558,7 @@ function reportCard() {
 
   const nợ = REP.owing.map(d => d.split('-').reverse().slice(0, 2).join('/'));
   const noHomNay = chưaĐiền;
-  return `<div class="card rep">
+  return `<div class="card note-card danger">
     <div class="ic">!</div>
     <div class="m">
       <div class="a">${REP.owing.length ? `Nợ báo cáo ${REP.owing.length} ca` : 'Hôm nay chưa có dòng nào'}</div>
@@ -553,8 +566,8 @@ function reportCard() {
         ? `Ngày ${nợ.slice(0, 6).join(', ')}${nợ.length > 6 ? '…' : ''}. Còn nợ thì không vào ca mới được.`
         : `Chưa có dòng nào mang mã <b>${REP.emp_code}</b> hôm nay ở bất kỳ file nào.`
           + ((REP.sheets || []).length ? `<br>Các file: ${REP.sheets.map(x => x.name).join(', ')}.` : '')
-          + ' Hoàn thành báo cáo và bấm "Đã hoàn thành".'}</div>
-      <div class="acts2">
+          + ' Điền một file bất kỳ rồi bấm "Tôi đã điền rồi".'}</div>
+      <div class="acts">
         <button class="btn btn-sm" onclick="recheckReport()">Tôi đã điền rồi</button>
         ${noHomNay ? '<button class="btn btn-sm" onclick="noActivity()">Ca không phát sinh</button>' : ''}
       </div>
@@ -578,6 +591,30 @@ async function recheckReport() {
   toast(r.report && r.report.today && r.report.today.rows ? 'Đã thấy báo cáo' : 'Chưa thấy',
         r.message || '', !!(r.report && r.report.today && r.report.today.rows));
   render();
+}
+
+async function addOT() {
+  const h = prompt('Làm thêm mấy giờ hôm nay?\n\nNhập số giờ, ví dụ 2 hoặc 1.5:');
+  if (!h) return;
+  const lý = prompt('Lý do OT (ai yêu cầu, việc gì):');
+  if (lý === null) return;
+  const k = askKey('ghi nhận OT');
+  if (k === null) return;
+  const r = await api('/api/ot', { hours: Number(h), reason: lý.trim(), key: k });
+  toast(r.ok ? 'Đã ghi nhận OT' : 'Chưa ghi được', r.message || '', !!r.ok);
+  await load();
+}
+
+async function clearOT() {
+  if (!confirm('Bỏ ghi nhận OT hôm nay?')) return;
+  const k = askKey('bỏ OT');
+  if (k === null) return;
+  const r = await fetch('/api/ot', {
+    method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ key: k }),
+  }).then(x => x.json()).catch(() => ({ ok: false }));
+  toast(r.ok ? 'Đã bỏ OT' : 'Không bỏ được', r.message || '', !!r.ok);
+  await load();
 }
 
 async function noActivity() {

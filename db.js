@@ -140,6 +140,18 @@ CREATE INDEX IF NOT EXISTS idx_rc_user   ON roll_calls(user_id, day);
 CREATE INDEX IF NOT EXISTS idx_rc_status ON roll_calls(status, due_at);
 
 -- Miễn báo cáo cho một ca cụ thể: ca không phát sinh việc, hoặc quản lý cho phép.
+-- Làm thêm giờ: kéo dài ca hôm đó, để xuống ca muộn không bị tính trễ
+-- và điểm danh vẫn chạy tới hết giờ OT.
+CREATE TABLE IF NOT EXISTS ot_records (
+  user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  day        TEXT    NOT NULL,
+  hours      REAL    NOT NULL,
+  reason     TEXT,
+  by_admin   INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (user_id, day)
+);
+
 CREATE TABLE IF NOT EXISTS report_exempt (
   user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   day        TEXT    NOT NULL,
@@ -148,18 +160,6 @@ CREATE TABLE IF NOT EXISTS report_exempt (
   created_at INTEGER NOT NULL,
   PRIMARY KEY (user_id, day)
 );
-
--- OT đột xuất: quản trị gán cho một người vào một ngày cụ thể. Chỉ để ghi nhận/
--- theo dõi, KHÔNG đụng đến giờ ca chính hay cách tính trễ.
-CREATE TABLE IF NOT EXISTS ot_days (
-  user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  day        TEXT    NOT NULL,            -- YYYY-MM-DD
-  note       TEXT,
-  set_by     TEXT,
-  created_at INTEGER NOT NULL,
-  PRIMARY KEY (user_id, day)
-);
-CREATE INDEX IF NOT EXISTS idx_ot_day ON ot_days(day);
 `);
 
 // Cột giờ ca — thêm sau nên dùng ALTER có kiểm tra, tránh lỗi khi chạy lại
@@ -167,10 +167,6 @@ CREATE INDEX IF NOT EXISTS idx_ot_day ON ot_days(day);
   const cols = db.prepare('PRAGMA table_info(users)').all().map((c) => c.name);
   if (!cols.includes('shift_start')) db.exec("ALTER TABLE users ADD COLUMN shift_start TEXT NOT NULL DEFAULT '09:00'");
   if (!cols.includes('shift_end'))   db.exec("ALTER TABLE users ADD COLUMN shift_end   TEXT NOT NULL DEFAULT '18:00'");
-
-  // Số giờ ca mặc định của từng người (8 hoặc 10 tiếng...) — dùng để suy ra giờ kết ca
-  // khi lịch tháng chỉ ghi một mốc giờ vào ca (không ghi "HH:mm-HH:mm" đầy đủ).
-  if (!cols.includes('shift_hours')) db.exec("ALTER TABLE users ADD COLUMN shift_hours INTEGER NOT NULL DEFAULT 8");
 
   if (!cols.includes('location')) db.exec("ALTER TABLE users ADD COLUMN location TEXT NOT NULL DEFAULT 'VN'");
   // Mã cá nhân lấy từ lương tháng trước. Lưu dạng băm, KHÔNG bao giờ lưu số gốc.
@@ -180,6 +176,10 @@ CREATE INDEX IF NOT EXISTS idx_ot_day ON ot_days(day);
   // Mã nhân viên dùng để khớp dòng trong sheet báo cáo. KHÔNG bí mật —
   // cố ý tách khỏi mã cá nhân, vì sheet cả team cùng xem.
   if (!cols.includes('emp_code')) db.exec('ALTER TABLE users ADD COLUMN emp_code TEXT');
+  // Giờ ca mặc định — đặt một lần, dùng cho mọi ngày không có dòng trong lịch tháng.
+  // Nhờ vậy không phải nhập file lịch hằng tháng nữa.
+  if (!cols.includes('default_start')) db.exec('ALTER TABLE users ADD COLUMN default_start TEXT');
+  if (!cols.includes('default_end'))   db.exec('ALTER TABLE users ADD COLUMN default_end TEXT');
 
   const oc = db.prepare('PRAGMA table_info(day_offs)').all().map((c) => c.name);
   if (!oc.includes('brand'))      db.exec('ALTER TABLE day_offs ADD COLUMN brand TEXT');
@@ -498,6 +498,17 @@ const MAX_OFF_PER_DAY_DEPT = Math.max(1, Number(process.env.MAX_OFF_PER_DAY_DEPT
 
 /* Ca của nhân viên quanh thời điểm `at`, đọc từ lịch tháng đã nhập.
    Xét cả ngày hôm trước để bắt ca qua đêm (vd 22:00–06:00 giờ địa phương). */
+/* Tháng này đã nhập lịch file cho người đó chưa.
+   Có file thì file là chuẩn: ngày nào không có dòng nghĩa là nghỉ.
+   Không có file thì dùng giờ ca mặc định, trừ ngày đã đăng ký nghỉ. */
+function monthHasSchedule(userId, ym) {
+  return !!db.prepare('SELECT 1 FROM shift_days WHERE user_id=? AND day LIKE ? LIMIT 1')
+    .get(userId, ym + '%');
+}
+
+const otOf = (userId, day) =>
+  db.prepare('SELECT * FROM ot_records WHERE user_id=? AND day=?').get(userId, day);
+
 function shiftWindow(user, at = now()) {
   const tz = tzOf(user.location);
   const today = dayInTz(at, tz);
@@ -505,11 +516,31 @@ function shiftWindow(user, at = now()) {
 
   for (const d of [addDays(today, -1), today]) {
     const row = db.prepare('SELECT * FROM shift_days WHERE user_id=? AND day=?').get(user.id, d);
-    if (!row) continue;
-    const startUtc = zonedToUtc(d, row.start_hm, tz).getTime();
-    let endUtc = zonedToUtc(d, row.end_hm, tz).getTime();
+
+    let startHm, endHm, source;
+    if (row) {
+      startHm = row.start_hm; endHm = row.end_hm; source = 'file';
+    } else if (user.default_start && user.default_end
+               && !monthHasSchedule(user.id, d.slice(0, 7))
+               && !isOffDay(user.id, d)) {
+      startHm = user.default_start; endHm = user.default_end; source = 'default';
+    } else {
+      continue;   // hôm đó nghỉ
+    }
+
+    const startUtc = zonedToUtc(d, startHm, tz).getTime();
+    let endUtc = zonedToUtc(d, endHm, tz).getTime();
     if (endUtc <= startUtc) endUtc += 24 * 3600000;   // ca qua đêm
-    cands.push({ day: d, start: startUtc, end: endUtc, start_hm: row.start_hm, end_hm: row.end_hm, tz });
+
+    // Có OT thì kéo dài giờ kết ca
+    const ot = otOf(user.id, d);
+    if (ot) endUtc += ot.hours * 3600000;
+
+    cands.push({
+      day: d, start: startUtc, end: endUtc,
+      start_hm: startHm, end_hm: endHm, tz, source,
+      ot_hours: ot ? ot.hours : 0,
+    });
   }
   return cands;
 }
@@ -616,6 +647,9 @@ function shiftToday(user) {
   const lastIn = [...rows].reverse().find((r) => r.kind === 'in');
   const lastOut = [...rows].reverse().find((r) => r.kind === 'out');
 
+  const w = shiftWindow(user, now()).filter((c) => c.day === today)[0] || null;
+  const ot = otOf(user.id, today);
+
   return {
     on_shift: !!(lastIn && (!lastOut || lastOut.actual_at < lastIn.actual_at)),
     checked_in_at: lastIn ? lastIn.actual_at : null,
@@ -623,9 +657,13 @@ function shiftToday(user) {
     day: today,
     location: user.location,
     timezone: tz,
-    has_shift: !!row,
-    shift_start: row ? row.start_hm : null,
-    shift_end: row ? row.end_hm : null,
+    has_shift: !!w,
+    shift_source: w ? w.source : null,          // 'file' hay 'default'
+    shift_start: w ? w.start_hm : null,
+    shift_end: w ? w.end_hm : null,
+    must_be_in_by: w ? w.start - SHIFT_EARLY_MIN * 60000 : null,
+    shift_end_at: w ? w.end : null,
+    ot: ot ? { hours: ot.hours, reason: ot.reason } : null,
     rows: rows.map((r) => ({
       kind: r.kind, kind_label: PUNCH_KINDS[r.kind], actual_at: r.actual_at,
       late_minutes: r.late_minutes, late_level: r.late_level,
@@ -683,6 +721,127 @@ function punchHistory(f = {}, viewer = null) {
   };
 }
 
+/* Nhật ký VÀO/RA CA — gộp cặp lên ca + xuống ca của cùng một ngày một người.
+   Đây là thứ quản lý cần khi hỏi "hôm qua ai vào lúc mấy giờ, ra lúc mấy giờ". */
+function shiftLog(f = {}, scope = null) {
+  const w = [], p = [];
+  if (scope !== null) { w.push('p.brand=?');       p.push(scope); }
+  if (f.user_id)      { w.push('p.user_id=?');     p.push(f.user_id); }
+  if (f.department)   { w.push('p.department=?');  p.push(f.department); }
+  if (f.brand)        { w.push('p.brand=?');       p.push(f.brand); }
+  if (f.from)         { w.push('p.actual_at>=?');  p.push(new Date(f.from + 'T00:00:00').getTime()); }
+  if (f.to)           { w.push('p.actual_at<=?');  p.push(new Date(f.to + 'T23:59:59').getTime()); }
+  w.push("p.kind IN ('in','out')");
+
+  const rows = db.prepare(
+    `SELECT p.*, u.name user_name, u.emp_code, u.location
+     FROM punches p JOIN users u ON u.id=p.user_id
+     WHERE ${w.join(' AND ')} ORDER BY p.actual_at DESC LIMIT 2000`).all(...p);
+
+  // Gộp theo người + ngày (theo giờ địa phương của người đó)
+  const byKey = new Map();
+  for (const r of rows) {
+    const tz = tzOf(r.location || 'VN');
+    const day = dayInTz(r.actual_at, tz);
+    const k = `${r.user_id}|${day}`;
+    if (!byKey.has(k)) {
+      byKey.set(k, {
+        user_id: r.user_id, user_name: r.user_name, emp_code: r.emp_code,
+        department: r.department, brand: r.brand, day,
+        in_at: null, out_at: null, in_late: null, in_late_min: 0,
+        out_late: null, out_late_min: 0, in_sched: null, out_sched: null,
+      });
+    }
+    const o = byKey.get(k);
+    if (r.kind === 'in' && (!o.in_at || r.actual_at < o.in_at)) {
+      o.in_at = r.actual_at; o.in_sched = r.scheduled_at;
+      o.in_late = r.late_level; o.in_late_min = r.late_minutes;
+    }
+    if (r.kind === 'out' && (!o.out_at || r.actual_at > o.out_at)) {
+      o.out_at = r.actual_at; o.out_sched = r.scheduled_at;
+      o.out_late = r.late_level; o.out_late_min = r.late_minutes;
+    }
+  }
+
+  const list = [...byKey.values()].map((o) => ({
+    ...o,
+    ot: (otOf(o.user_id, o.day) || {}).hours || 0,
+    duration_min: o.in_at && o.out_at ? Math.round((o.out_at - o.in_at) / 60000) : null,
+    missing_out: !!(o.in_at && !o.out_at),
+  })).sort((a, b) => (b.in_at || 0) - (a.in_at || 0));
+
+  return {
+    rows: list,
+    stats: {
+      total: list.length,
+      late_in: list.filter((x) => x.in_late).length,
+      late_out: list.filter((x) => x.out_late).length,
+      missing_out: list.filter((x) => x.missing_out).length,
+      ot_days: list.filter((x) => x.ot > 0).length,
+    },
+  };
+}
+
+/* Chi tiết theo NGÀY cho một người — dùng cho nút "Xem lượt" ở tab Điểm danh */
+function rollCallByDay(userId, f = {}) {
+  const w = ['r.user_id=?'], p = [userId];
+  if (f.from) { w.push('r.day>=?'); p.push(f.from); }
+  if (f.to)   { w.push('r.day<=?'); p.push(f.to); }
+
+  const rows = db.prepare(
+    `SELECT r.day,
+            COUNT(*) tong,
+            SUM(CASE WHEN r.status='done'      THEN 1 ELSE 0 END) da_diem_danh,
+            SUM(CASE WHEN r.status='missed'    THEN 1 ELSE 0 END) vang,
+            SUM(CASE WHEN r.is_makeup=1        THEN 1 ELSE 0 END) luot_bu,
+            SUM(CASE WHEN r.status='cancelled' THEN 1 ELSE 0 END) da_huy
+     FROM roll_calls r WHERE ${w.join(' AND ')}
+     GROUP BY r.day ORDER BY r.day DESC LIMIT 60`).all(...p);
+
+  const chiTiet = db.prepare(
+    `SELECT id, day, due_at, deadline_at, answered_at, status, is_makeup, defer_reason
+     FROM roll_calls WHERE ${w.join(' AND ')} ORDER BY day DESC, due_at DESC LIMIT 300`).all(...p);
+
+  return { byDay: rows, items: chiTiet };
+}
+
+/* Chi tiết hoạt động rời vị trí theo NGÀY của một người — cho nút "Xem lượt" ở tab Theo dõi */
+function activityByDay(userId, f = {}) {
+  const w = ['a.user_id=?'], p = [userId];
+  if (f.from) { w.push("date(a.started_at/1000,'unixepoch','+7 hours')>=?"); p.push(f.from); }
+  if (f.to)   { w.push("date(a.started_at/1000,'unixepoch','+7 hours')<=?"); p.push(f.to); }
+
+  const rows = db.prepare(
+    `SELECT date(a.started_at/1000,'unixepoch','+7 hours') ngay,
+            COUNT(*) so_luot,
+            SUM(IFNULL(a.duration_sec,0)) tong_giay,
+            SUM(CASE WHEN a.is_over_limit=1 THEN 1 ELSE 0 END) qua_gio,
+            SUM(CASE WHEN a.closed_by='auto' THEN 1 ELSE 0 END) quen_bam,
+            SUM(CASE WHEN a.is_over_limit=1
+                THEN MAX(0, IFNULL(a.duration_sec,0) - a.limit_minutes*60) ELSE 0 END) giay_lo
+     FROM activities a WHERE ${w.join(' AND ')}
+     GROUP BY ngay ORDER BY ngay DESC LIMIT 60`).all(...p);
+
+  const items = db.prepare(
+    `SELECT a.*, date(a.started_at/1000,'unixepoch','+7 hours') ngay
+     FROM activities a WHERE ${w.join(' AND ')}
+     ORDER BY a.started_at DESC LIMIT 300`).all(...p);
+
+  return {
+    byDay: rows.map((r) => ({
+      ...r,
+      tong_phut: Math.round(r.tong_giay / 60),
+      phut_lo: Math.round(r.giay_lo / 60),
+    })),
+    items: items.map((a) => ({
+      ...present({ ...a, user_name: null }),
+      ngay: a.ngay, ended_at: a.ended_at, duration_sec: a.duration_sec,
+      is_over_limit: !!a.is_over_limit, closed_by: a.closed_by,
+      over_sec: a.is_over_limit ? Math.max(0, (a.duration_sec || 0) - a.limit_minutes * 60) : 0,
+    })),
+  };
+}
+
 /* Tổng hợp trễ THEO NGƯỜI — thứ quản lý cần ở mục này, thay vì nhật ký từng lượt.
    Xếp theo mức nghiêm trọng: trễ nặng trước, rồi tới tổng số phút. */
 function lateByUser(f = {}, scope = null) {
@@ -726,6 +885,9 @@ function lateByUser(f = {}, scope = null) {
 /* ============================================================
    LỊCH OFF
    ============================================================ */
+const isOffDay = (userId, day) =>
+  !!db.prepare('SELECT 1 FROM day_offs WHERE user_id=? AND day=?').get(userId, day);
+
 const ymOf = (day) => String(day).slice(0, 7);
 const isLocked = (ym) => !!db.prepare('SELECT 1 FROM off_locks WHERE ym=?').get(ym);
 
@@ -876,15 +1038,6 @@ function setLock(ym, locked) {
    mode 'merge'   : chỉ đụng tới người có trong file, người khác giữ nguyên
    mode 'replace' : xoá sạch lịch tháng đó của MỌI người rồi ghi lại theo file
    ============================================================ */
-/* Lịch chỉ ghi một mốc giờ vào ca (VD "07:00") -> suy ra giờ kết ca theo số giờ
-   ca mặc định của người đó (cột shift_hours, đặt ở tab Nhân sự). Ca qua đêm tự
-   được nhận ra ở tầng đọc lịch (shiftWindow) khi end_hm <= start_hm. */
-function endFromStart(startHm, hours) {
-  const [h, m] = String(startHm).split(':').map(Number);
-  const total = (((h * 60 + m) + Math.round(Number(hours) * 60)) % 1440 + 1440) % 1440;
-  return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
-}
-
 function applySchedule(parsed, mode = 'merge', scope = null) {
   const { ym, rows } = parsed;
   const matched = [], missing = [], outside = [], keySet = [];
@@ -938,10 +1091,7 @@ function applySchedule(parsed, mode = 'merge', scope = null) {
       }
 
       for (const [day, t] of Object.entries(rec.days)) {
-        // Ô chỉ ghi 1 mốc giờ: suy ra giờ kết ca từ số giờ ca mặc định của người này
-        const start = t.singleStart || t.start;
-        const end = t.singleStart ? endFromStart(t.singleStart, user.shift_hours || 8) : t.end;
-        ins.run(user.id, day, start, end);
+        ins.run(user.id, day, t.start, t.end);
         dayCount++;
       }
     }
@@ -973,45 +1123,6 @@ function scheduleSummary(ym, scope = null) {
     rows: rows.map((r) => ({ ...r, off_days: dim - r.work_days, timezone: tzOf(r.location) })),
     no_schedule: rows.filter((r) => r.work_days === 0).length,
   };
-}
-
-const SHIFT_HOURS_MIN = 1, SHIFT_HOURS_MAX = 16;
-function setShiftHours(userId, hours) {
-  const h = Number(hours);
-  if (!Number.isInteger(h) || h < SHIFT_HOURS_MIN || h > SHIFT_HOURS_MAX) {
-    throw new Error(`Số giờ ca phải là số nguyên từ ${SHIFT_HOURS_MIN} đến ${SHIFT_HOURS_MAX}.`);
-  }
-  db.prepare('UPDATE users SET shift_hours=? WHERE id=?').run(h, userId);
-  return h;
-}
-
-/* ============================================================
-   OT ĐỘT XUẤT — chỉ quản trị gán, thuần ghi nhận/theo dõi, KHÔNG đụng
-   đến giờ ca chính hay cách tính trễ.
-   ============================================================ */
-function setOT(userId, day, note, byName) {
-  db.prepare(
-    `INSERT INTO ot_days (user_id, day, note, set_by, created_at) VALUES (?,?,?,?,?)
-     ON CONFLICT(user_id, day) DO UPDATE SET note=excluded.note, set_by=excluded.set_by, created_at=excluded.created_at`
-  ).run(userId, day, note || null, byName || null, now());
-}
-function clearOT(userId, day) {
-  db.prepare('DELETE FROM ot_days WHERE user_id=? AND day=?').run(userId, day);
-}
-function otOf(userId, ym) {
-  return db.prepare('SELECT day, note FROM ot_days WHERE user_id=? AND day LIKE ? ORDER BY day').all(userId, ym + '%');
-}
-function otSummary(ym, scope = null) {
-  return db.prepare(
-    `SELECT o.user_id, o.day, o.note, o.set_by, u.name, u.department, u.brand
-     FROM ot_days o JOIN users u ON u.id = o.user_id
-     WHERE o.day LIKE ? AND (? IS NULL OR u.brand=?)
-     ORDER BY o.day DESC, u.name`
-  ).all(ym + '%', scope, scope);
-}
-function otToday(user) {
-  const day = todayOf(user);
-  return db.prepare('SELECT day, note FROM ot_days WHERE user_id=? AND day=?').get(user.id, day) || null;
 }
 
 /* ============================================================
@@ -1114,7 +1225,9 @@ function sweepRollCalls() {
     if (hasCheckedOut(u)) continue;                 // đã xuống ca thì không sinh thêm
     const w = shiftWindow(u, t);
     for (const c of w) {
-      if (t >= c.start && t <= c.end) planned += planRollCalls(u, c.day, c.start, c.end);
+      // Sinh ngay khi biết ca, kể cả ca chưa bắt đầu — nhờ vậy quản trị xem
+      // được trước cả ngày ai sẽ bị điểm danh lúc mấy giờ.
+      if (t <= c.end) planned += planRollCalls(u, c.day, c.start, c.end);
     }
   }
 
@@ -1314,7 +1427,6 @@ function rollCallReport(f = {}, scope = null) {
   const rows = db.prepare(
     `SELECT u.id, u.name user_name, r.department, r.brand,
             COUNT(*) tong,
-            COUNT(DISTINCT r.day) so_ngay,
             SUM(CASE WHEN r.status='done'     THEN 1 ELSE 0 END) da_diem_danh,
             SUM(CASE WHEN r.status='missed'   THEN 1 ELSE 0 END) vang,
             SUM(CASE WHEN r.is_makeup=1       THEN 1 ELSE 0 END) luot_bu,
@@ -1324,94 +1436,12 @@ function rollCallReport(f = {}, scope = null) {
      ${where} GROUP BY u.id, r.department, r.brand
      ORDER BY vang DESC, tong DESC`).all(...p);
 
-  // Trung bình lượt/ngày = tổng lượt (kể cả lượt bù) / số ngày có ít nhất 1 lượt.
-  // So với RC_PER_SHIFT cấu hình chung để quản trị thấy ngay ai bị lệch hẳn
-  // (VD bị bắn tay nhiều lần, hoặc một ngày lên 2 ca).
-  rows.forEach((r) => {
-    r.tb_ngay = r.so_ngay ? Math.round((r.tong / r.so_ngay) * 10) / 10 : 0;
-    r.lech_muc = r.so_ngay ? Math.round(r.tb_ngay) !== RC_PER_SHIFT : false;
-  });
-
   const s = rows.reduce((a, r) => ({
     tong: a.tong + r.tong, done: a.done + r.da_diem_danh,
     missed: a.missed + r.vang, makeup: a.makeup + r.luot_bu,
   }), { tong: 0, done: 0, missed: 0, makeup: 0 });
 
-  return { rows, stats: s, per_shift: RC_PER_SHIFT };
-}
-
-/* Nhật ký từng lượt điểm danh của một người — dùng cho "Xem lượt" ở tab Điểm danh,
-   cùng kiểu với punchHistory(only_late) ở tab Trễ. */
-const RC_STATUS_LABEL = {
-  done: 'Đã điểm danh', missed: 'Vắng', pending: 'Đang chờ trả lời',
-  waiting: 'Chờ dừng hoạt động', deferred: 'Đã hoãn', cancelled: 'Đã huỷ',
-};
-
-function rollCallDetail(f = {}, scope = null) {
-  const w = [], p = [];
-  if (scope !== null)  { w.push('r.brand=?');      p.push(scope); }
-  if (f.user_id)       { w.push('r.user_id=?');    p.push(f.user_id); }
-  if (f.department)    { w.push('r.department=?'); p.push(f.department); }
-  if (f.brand)         { w.push('r.brand=?');      p.push(f.brand); }
-  if (f.from)          { w.push('r.day>=?');       p.push(f.from); }
-  if (f.to)            { w.push('r.day<=?');       p.push(f.to); }
-  if (f.rc_status)     { w.push('r.status=?');     p.push(f.rc_status); }
-
-  const where = w.length ? 'WHERE ' + w.join(' AND ') : '';
-  const rows = db.prepare(
-    `SELECT r.*, u.name user_name FROM roll_calls r JOIN users u ON u.id=r.user_id
-     ${where} ORDER BY r.day DESC, IFNULL(r.due_at, r.created_at) DESC LIMIT ?`
-  ).all(...p, Math.min(+f.limit || 300, 100000));
-
-  return {
-    rows: rows.map((r) => ({
-      id: r.id, user_id: r.user_id, user_name: r.user_name,
-      day: r.day, due_at: r.due_at, deadline_at: r.deadline_at,
-      status: r.status, status_label: RC_STATUS_LABEL[r.status] || r.status,
-      answered_at: r.answered_at, is_makeup: !!r.is_makeup,
-      defer_reason: r.defer_reason, department: r.department, brand: r.brand, ip: r.ip,
-    })),
-  };
-}
-
-/* Tổng hợp "đi lố hoạt động" THEO NGƯỜI — cùng kiểu lateByUser, dùng cho
-   "Xem lượt" ở tab Theo dõi. Số phút lố = thời lượng thực − mức cho phép. */
-function overLimitByUser(f = {}, scope = null) {
-  const w = ['a.is_over_limit=1'], p = [];
-  if (scope !== null)  { w.push('a.brand=?');       p.push(scope); }
-  if (f.user_id)       { w.push('a.user_id=?');     p.push(f.user_id); }
-  if (f.department)    { w.push('a.department=?');  p.push(f.department); }
-  if (f.brand)         { w.push('a.brand=?');       p.push(f.brand); }
-  if (f.type_code)     { w.push('a.type_code=?');   p.push(f.type_code); }
-  if (f.from)          { w.push('a.started_at>=?'); p.push(new Date(f.from + 'T00:00:00').getTime()); }
-  if (f.to)            { w.push('a.started_at<=?'); p.push(new Date(f.to + 'T23:59:59').getTime()); }
-
-  const where = 'WHERE ' + w.join(' AND ');
-  const rows = db.prepare(
-    `SELECT u.id, u.name user_name, a.department, a.brand,
-            COUNT(*) times,
-            SUM(MAX(a.duration_sec / 60.0 - a.limit_minutes, 0)) total_over_minutes,
-            MAX(a.duration_sec / 60.0 - a.limit_minutes) worst_over_minutes,
-            MAX(a.started_at) last_at
-     FROM activities a JOIN users u ON u.id=a.user_id
-     ${where}
-     GROUP BY u.id, a.department, a.brand
-     ORDER BY total_over_minutes DESC`).all(...p);
-
-  const mapped = rows.map((r) => ({
-    ...r,
-    total_over_minutes: Math.round(r.total_over_minutes || 0),
-    worst_over_minutes: Math.round(r.worst_over_minutes || 0),
-  }));
-
-  return {
-    rows: mapped,
-    stats: {
-      people: mapped.length,
-      times: mapped.reduce((n, r) => n + r.times, 0),
-      minutes: mapped.reduce((n, r) => n + r.total_over_minutes, 0),
-    },
-  };
+  return { rows, stats: s };
 }
 
 /* ============================================================
@@ -1447,6 +1477,65 @@ function backfillEmpCodes() {
   const list = db.prepare("SELECT * FROM users WHERE role='staff' AND emp_code IS NULL").all();
   list.forEach(ensureEmpCode);
   return list.length;
+}
+
+/* ============================================================
+   GIỜ CA MẶC ĐỊNH & LÀM THÊM GIỜ
+   ============================================================ */
+const HM_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+function setDefaultShift(userId, start, end) {
+  if (start === '' && end === '') {
+    db.prepare('UPDATE users SET default_start=NULL, default_end=NULL WHERE id=?').run(userId);
+    return { ok: true, message: 'Đã bỏ giờ ca mặc định.' };
+  }
+  if (!HM_RE.test(start || '') || !HM_RE.test(end || '')) {
+    return { ok: false, message: 'Giờ phải dạng HH:MM, ví dụ 09:00.' };
+  }
+  db.prepare('UPDATE users SET default_start=?, default_end=? WHERE id=?').run(start, end, userId);
+  return { ok: true, message: `Đã đặt ca mặc định ${start}–${end}.` };
+}
+
+/* Đặt hàng loạt cho một bộ phận */
+function setDefaultShiftBulk(dept, brand, start, end, scope = null) {
+  if (!HM_RE.test(start || '') || !HM_RE.test(end || '')) {
+    return { ok: false, message: 'Giờ phải dạng HH:MM.' };
+  }
+  const rows = db.prepare(
+    `SELECT id FROM users WHERE role='staff' AND is_active=1
+     AND (? IS NULL OR department=?) AND (? IS NULL OR brand=?) AND (? IS NULL OR brand=?)`
+  ).all(dept || null, dept || null, brand || null, brand || null, scope, scope);
+
+  const upd = db.prepare('UPDATE users SET default_start=?, default_end=? WHERE id=?');
+  db.transaction(() => rows.forEach((r) => upd.run(start, end, r.id)))();
+  return { ok: true, message: `Đã đặt ca ${start}–${end} cho ${rows.length} người.` };
+}
+
+/* Ghi nhận OT cho ngày hôm nay */
+function setOT(user, hours, reason, byAdmin = false, day = null) {
+  const h = Number(hours);
+  if (!Number.isFinite(h) || h <= 0 || h > 12) {
+    return { ok: false, message: 'Số giờ OT phải từ 0.5 đến 12.' };
+  }
+  const d = day || dayInTz(now(), tzOf(user.location));
+  const w = shiftWindow(user, now()).filter((c) => c.day === d);
+  if (!w.length && !byAdmin) {
+    return { ok: false, message: 'Hôm nay bạn không có ca nên không ghi nhận OT được.' };
+  }
+  db.prepare(`INSERT OR REPLACE INTO ot_records (user_id,day,hours,reason,by_admin,created_at)
+              VALUES (?,?,?,?,?,?)`).run(user.id, d, h, reason || null, byAdmin ? 1 : 0, now());
+  return { ok: true, message: `Đã ghi nhận OT ${h} giờ cho ngày ${d.split('-').reverse().join('/')}.` };
+}
+
+function clearOT(userId, day) {
+  db.prepare('DELETE FROM ot_records WHERE user_id=? AND day=?').run(userId, day);
+  return { ok: true, message: 'Đã bỏ ghi nhận OT.' };
+}
+
+function otToday(user) {
+  const d = dayInTz(now(), tzOf(user.location));
+  const r = otOf(user.id, d);
+  return r ? { day: d, hours: r.hours, reason: r.reason, by_admin: !!r.by_admin } : null;
 }
 
 /* ============================================================
@@ -1501,7 +1590,8 @@ function shiftEndedToday(user) {
 const allUsers = (scope = null) =>
   db.prepare(
     `SELECT u.id,u.name,u.key,u.department,u.brand,u.location,u.role,u.is_active,
-            u.device_id,u.device_seen_at,u.key_month,u.emp_code,u.shift_hours,
+            u.device_id,u.device_seen_at,u.key_month,u.emp_code,
+            u.default_start,u.default_end,
             CASE WHEN u.key_hash IS NULL THEN 0 ELSE 1 END has_key,
             (SELECT COUNT(*) FROM shift_days s WHERE s.user_id=u.id AND s.day LIKE ?) work_days
      FROM users u WHERE (? IS NULL OR u.brand=? OR u.role='super')
@@ -1528,11 +1618,11 @@ module.exports = {
   ensureEmpCode, setEmpCode, backfillEmpCodes,
   isExempt, setExempt, clearExempt, pastShiftDays, todayOf, shiftEndedToday,
   hasCheckedOut, cancelPendingRollCalls, hasShiftOn,
+  setDefaultShift, setDefaultShiftBulk, setOT, clearOT, otToday, otOf,
+  monthHasSchedule, isOffDay,
   REPORT_DEPTS, REPORT_GRACE_MIN, REPORT_BLOCK_AFTER, REPORT_ALERT_AFTER,
   sweepRollCalls, releaseMakeups, activeRollCall, answerRollCall, rollCallReport, upcomingRollCalls, fireRollCall, deferRollCall,
-  rollCallDetail, overLimitByUser,
+  rollCallByDay, activityByDay, shiftLog,
   RC_PER_SHIFT, RC_WINDOW_MIN, RC_MAKEUP_MIN,
   applySchedule, scheduleOf, scheduleSummary,
-  setShiftHours, SHIFT_HOURS_MIN, SHIFT_HOURS_MAX,
-  setOT, clearOT, otOf, otSummary, otToday,
 };
