@@ -144,23 +144,12 @@ async function load() {
   $('#scopeTag').innerHTML = isSuper
     ? '<span class="pill">Quản trị tổng · cả hai brand</span>'
     : `<span class="pill pri">Brand ${esc(B.me ? B.me.brand : '')}</span>`;
-  TAB === 'b' ? renderBoard() : renderUsers();
+  if (TAB === 'b') { renderBoard(); startBoardTimer(); } else renderUsers();
 }
 
 /* ---------- Theo dõi ---------- */
 function renderBoard() {
-  const lanes = B.lanes.map(c => {
-    const h = c.holder, label = `${c.department}${c.brand ? ' · ' + c.brand : ''}`;
-    if (!h) return `<div class="lane"><div class="ic">${c.department.slice(0,2)}</div>
-      <div class="m"><div class="a">${label}</div><div class="b">Trống · ${c.headcount} nhân sự</div></div></div>`;
-    const l = leftOf(h);
-    return `<div class="lane ${l < 0 ? 'over' : 'busy'}">
-      <div class="ic">${c.department.slice(0,2)}</div>
-      <div class="m"><div class="a">${esc(h.user_name)}</div>
-        <div class="b">${label} · ${h.type_name}</div></div>
-      <div class="cd" data-cd="${h.id}">${clk(l)}</div>
-      <i class="fill" data-fill="${h.id}" style="width:${pctOf(h)}%"></i></div>`;
-  }).join('');
+
 
   const cb = {
     staff: '<span class="sub">Nhân viên</span>',
@@ -190,7 +179,6 @@ function renderBoard() {
     <option value="">${ph}</option>${o}</select>`;
 
   $('#pb').innerHTML = `
-    <div class="lanes">${lanes || '<div class="lane"><div class="m"><div class="b">Chưa có nhân sự nào.</div></div></div>'}</div>
 
     <div class="kpis">
       <div class="kpi"><div class="n">${B.stats.total}</div><div class="l">Lượt khớp bộ lọc</div></div>
@@ -290,15 +278,19 @@ function renderUsers() {
       </div>
       <div id="schOut" class="sub" style="margin-top:10px;line-height:1.6"></div>
       <div class="note" style="font-size:12.5px;color:var(--tx-3);margin-top:8px;line-height:1.55">
-        Một dòng một người, mỗi ngày trong tháng một cột:<br>
-        <span class="mono">Ma | Ten | KhuVuc | BoPhan | Brand | MaCaNhan | ThangLuong | 1 | 2 | … | 31</span>.
-        Ô ghi <span class="mono">08:00-16:00</span>, để trống hoặc <span class="mono">OFF</span> là nghỉ.
-        Giờ trong file là <b>giờ địa phương</b> của người đó — KhuVuc <span class="mono">VN</span> hay
-        <span class="mono">ARM</span> quyết định múi giờ.
-        Cột <span class="mono">MaCaNhan</span> do quản lý tự đặt, 4–32 ký tự không khoảng trắng;
-        để trống thì giữ mã cũ. Hệ thống băm ngay khi nhận, không lưu bản gốc.
-        <b>Định dạng cột này thành Text trong Excel</b>, nếu không Excel sẽ cắt số 0 đầu. Dùng chung được file của bot Telegram,
-        chỉ cần đổi cột TelegramID thành cột <span class="mono">Ma</span>.
+        Một dòng một người, mỗi ngày một cột.
+        Tiêu đề ngày viết <span class="mono">24/08</span>, <span class="mono">01/09</span>
+        hoặc chỉ số ngày <span class="mono">1 2 3</span>.<br>
+        Ô lịch ghi <b>một mốc giờ vào ca</b> (<span class="mono">10:00</span>,
+        <span class="mono">2:00</span>, <span class="mono">23:00</span>) — giờ kết tính theo
+        <b>độ dài ca</b> của người đó ở bảng dưới.
+        Ghi <span class="mono">DO</span>, <span class="mono">AL</span>, <span class="mono">OFF</span>
+        hoặc để trống là ngày nghỉ.<br>
+        Cột định danh: <span class="mono">Ma</span> (mã 8 ký tự trong link) hoặc
+        <span class="mono">Ten</span>. Các cột <span class="mono">KhuVuc</span>,
+        <span class="mono">BoPhan</span>, <span class="mono">Brand</span>,
+        <span class="mono">MaCaNhan</span>, <span class="mono">ThangLuong</span> là tuỳ chọn.
+        <b>Định dạng cột MaCaNhan thành Text</b>, nếu không Excel cắt mất số 0 đầu.
       </div>
     </div>
 
@@ -482,6 +474,9 @@ async function loadRollCalls() {
     <td class="c">${x.vang ? `<span class="pill red">${x.vang}</span>` : '<span class="sub">—</span>'}</td>
     <td class="c">${x.luot_bu ? `<span class="pill amb">${x.luot_bu}</span>` : '<span class="sub">—</span>'}</td>
     <td class="c">${x.dang_cho || '<span class="sub">—</span>'}</td>
+    <td class="c">${x.thu_cong
+      ? `<span class="pill blu" title="Quản lý kiểm tra đột xuất">${x.thu_cong}</span>`
+      : '<span class="sub">—</span>'}</td>
     <td class="c">${x.da_huy
       ? `<span class="pill" title="Huỷ vì đã xuống ca trước khi tới lượt">${x.da_huy}</span>`
       : '<span class="sub">—</span>'}</td>
@@ -521,8 +516,9 @@ async function loadRollCalls() {
         <button class="btn btn-pri" onclick="fireRollCall()">Bắn ngay</button>
       </div>
       <div class="note" style="font-size:12.5px;color:var(--tx-3);margin-top:9px;line-height:1.55">
-        Dùng khi cần kiểm tra đột xuất, không chờ lượt ngẫu nhiên.
-        Người đang rời vị trí sẽ được hoãn như bình thường, không bị tính vắng.
+        Quyền kiểm tra đột xuất của quản lý — bắn được <b>bất cứ lúc nào</b>,
+        kể cả khi nhân viên vừa điểm danh xong hay đang có lượt tự động chờ.
+        Chỉ bỏ qua người hôm nay không có ca hoặc đã xuống ca.
       </div>
     </div>
 
@@ -535,8 +531,8 @@ async function loadRollCalls() {
       <thead><tr><th class="wide">Nhân viên</th><th class="c">Tổng lượt</th>
         <th class="c">Đã điểm danh</th><th class="c">Vắng</th>
         <th class="c">Lượt bù</th><th class="c">Đang chờ</th>
-        <th class="c">Đã huỷ</th><th class="c">Tỉ lệ</th></tr></thead>
-      <tbody>${trs || `<tr><td colspan="8" class="empty">
+        <th class="c">Thủ công</th><th class="c">Đã huỷ</th><th class="c">Tỉ lệ</th></tr></thead>
+      <tbody>${trs || `<tr><td colspan="9" class="empty">
         Chưa có lượt điểm danh nào.<br>
         <span class="sub">Hệ thống chỉ sinh điểm danh cho người <b>đang trong ca theo lịch</b>.
         Chưa nhập lịch ca tháng thì không có lượt nào.</span></td></tr>`}</tbody>
@@ -575,7 +571,9 @@ function upcomingBox(d) {
         <span class="sub"> · ${x.emp_code || '—'} · ${x.department || '—'}${x.brand ? ' · ' + x.brand : ''}</span></td>
       <td>${x.due_at ? hms(x.due_at) : '—'}</td>
       <td>${khi}</td>
-      <td>${x.is_makeup ? '<span class="pill amb">Bù</span>' : '<span class="sub">thường</span>'}</td>
+      <td>${x.source === 'manual'
+        ? '<span class="pill blu">Thủ công</span>'
+        : x.is_makeup ? '<span class="pill amb">Bù</span>' : '<span class="sub">Tự động</span>'}</td>
       <td class="r">${txt ? `<span class="pill ${cls}">${txt}</span>` : ''}</td>
     </tr>`;
   }).join('');
@@ -1153,21 +1151,27 @@ async function admAdd(userId, name) {
 }
 
 const PANES = { b:['tb','pb'], sl:['tsl','psl'], l:['tl','pl'], o:['to','po'], r:['tr','pr'], rp:['trp','prp'], u:['tu','pu'], m:['tm','pm'] };
-let rcTimer = null;
+let rcTimer = null, bTimer = null;
 function startRcTimer() {
   clearInterval(rcTimer);
   rcTimer = setInterval(() => { if (TAB === 'r') loadRollCalls(); }, 30000);
 }
+/* Tab Theo dõi phải bắt kịp lúc nhân viên vừa bấm đi — 12 giây một lần */
+function startBoardTimer() {
+  clearInterval(bTimer);
+  bTimer = setInterval(() => { if (TAB === 'b' && !document.hidden) load(); }, 12000);
+}
 
 function setTab(k) {
   if (k !== 'r') clearInterval(rcTimer);
+  if (k !== 'b') clearInterval(bTimer);
   TAB = k;
   Object.entries(PANES).forEach(([key, [btn, pane]]) => {
     $('#' + btn).classList.toggle('on', key === k);
     $('#' + pane).hidden = key !== k;
   });
   $('#exp').hidden = !(k === 'b' || k === 'l');
-  if (k === 'b') renderBoard();
+  if (k === 'b') { renderBoard(); startBoardTimer(); }
   else if (k === 'l') loadLate();
   else if (k === 'o') loadOffs();
   else if (k === 'sl') loadShiftLog();
