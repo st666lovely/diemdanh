@@ -885,11 +885,12 @@ async function loadShiftLog() {
     <td>${dmy(x.in_at || x.out_at)}</td>
     <td class="c mono">${gio(x.in_at)}</td>
     <td class="c">${x.in_at ? treBadge(x.in_late, x.in_late_min) : '<span class="sub">—</span>'}</td>
-    <td class="c mono">${x.missing_out
-      ? '<span class="pill red">chưa bấm</span>' : gio(x.out_at)}</td>
+    <td class="c mono">${x.out_at ? gio(x.out_at)
+      : x.in_progress ? '<span class="pill pri"><span class="dot"></span>đang trực</span>'
+      : '<span class="pill red">quên bấm ra</span>'}</td>
     <td class="c">${x.out_at ? treBadge(x.out_late, x.out_late_min) : '<span class="sub">—</span>'}</td>
     <td class="c">${x.duration_min != null
-      ? `${Math.floor(x.duration_min / 60)}h${String(x.duration_min % 60).padStart(2, '0')}`
+      ? `${x.in_progress ? '~' : ''}${Math.floor(x.duration_min / 60)}h${String(x.duration_min % 60).padStart(2, '0')}`
       : '<span class="sub">—</span>'}</td>
     <td class="c">${x.ot ? `<span class="pill amb">+${x.ot}h</span>` : '<span class="sub">—</span>'}</td>
   </tr>`).join('');
@@ -905,6 +906,7 @@ async function loadShiftLog() {
     <div class="kpis">
       <div class="kpi"><div class="n">${d.stats.total}</div><div class="l">Ca trong kỳ</div></div>
       <div class="kpi amb"><div class="n">${d.stats.late_in}</div><div class="l">Vào trễ</div></div>
+      <div class="kpi pri"><div class="n">${d.stats.in_progress}</div><div class="l">Đang trực</div></div>
       <div class="kpi red"><div class="n">${d.stats.missing_out}</div><div class="l">Quên bấm ra</div></div>
       <div class="kpi"><div class="n">${d.stats.ot_days}</div><div class="l">Ca có OT</div></div>
     </div>
