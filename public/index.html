@@ -40,6 +40,10 @@
 })();
 
 const $ = s => document.querySelector(s);
+/* Chặn chữ người dùng nhập phá vỡ HTML — lý do OT, tên hoạt động... */
+const esc = v => String(v == null ? '' : v)
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 const pad = n => String(n).padStart(2, '0');
 const clk = s => (s < 0 ? '-' : '') + pad(Math.floor(Math.abs(s) / 60)) + ':' + pad(Math.abs(s) % 60);
 let TZ = null;   // múi giờ khu vực của nhân viên, server gửi xuống
@@ -560,7 +564,8 @@ let REP = null;
 let repBlocked = false;      // bật khi bấm Xuống ca mà bị chặn
 
 function reportCard() {
-  if (!REP || REP.off || REP.sheet_error) return '';
+  // Thiếu trường nào cũng bỏ qua thẻ này thay vì làm trắng cả trang
+  if (!REP || REP.off || REP.sheet_error || !Array.isArray(REP.owing)) return '';
   const t = REP.today;
   const chưaĐiền = t && t.rows === 0 && !t.exempt;
   const đếnLúcNhắc = chưaĐiền && (repBlocked || (t && t.shift_ended));
@@ -644,6 +649,12 @@ async function noActivity() {
   if (r.ok) loadReport(true);
 }
 
+/* Một thẻ lỗi không được làm trắng cả trang. Bọc từng thẻ lại,
+   thẻ nào hỏng thì bỏ qua thẻ đó và ghi vào console. */
+function an(fn, ten) {
+  try { return fn(); } catch (e) { console.error('Lỗi khi vẽ ' + ten + ':', e); return ''; }
+}
+
 function render() {
   const d = new Date(nowMs());
   const mine = S.current, locked = S.locked_by;
@@ -670,11 +681,11 @@ function render() {
   $('#app').innerHTML = `
     <div class="bar span-all"><span class="nm">${S.me.name}</span><span class="sp"></span>
       ${S.me.role === 'admin' ? '<a class="pill" href="/admin">Quản trị</a>' : ''}</div>
-    <div class="alerts span-all">${rollCallCard()}${reportCard()}${soundCard()}${installCard()}</div>
+    <div class="alerts span-all">${an(rollCallCard, 'rollCallCard')}${an(reportCard, 'reportCard')}${an(soundCard, 'soundCard')}${an(installCard, 'installCard')}</div>
     ${heroCard(d, mine, left, over)}
-    ${timerCard(mine, left, over)}
-    ${shiftCard()}
-    <div class="card a-acts">${depBlock(mine, locked)}${action}</div>
+    ${an(() => timerCard(mine, left, over), 'timerCard')}
+    ${an(shiftCard, 'shiftCard')}
+    <div class="card a-acts">${an(() => depBlock(mine, locked), 'depBlock')}${action}</div>
     <div class="card a-stats">
       <div class="card-h"><span class="t">Rời vị trí hôm nay</span>
         <span class="r">${T.count ? T.count + ' lượt' : 'chưa có lượt nào'}</span></div>
@@ -689,7 +700,7 @@ function render() {
           <span class="d ${r.is_over_limit ? 'red' : ''}">${r.duration_sec == null ? 'đang chạy'
             : Math.floor(r.duration_sec / 60) + 'p' + pad(r.duration_sec % 60)}</span></div>`).join('')}</div>` : ''}
     </div>
-    ${offCard()}
+    ${an(offCard, 'offCard')}
     <div class="hint span-all">Mỗi bộ phận chỉ 1 người rời chỗ cùng lúc.<br>
       Quên bấm “Dừng lại” thì hệ thống tự đóng sau khi quá giờ 30 phút và ghi chú lại.</div>`;
 }
