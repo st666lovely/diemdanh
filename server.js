@@ -21,7 +21,10 @@ const PORT = process.env.PORT || 3000;
 // Đây đúng là lỗi khiến hệ thống chấm công cũ ghi 127.0.0.1 vào bản ghi.
 app.set('trust proxy', true);
 
-app.use(express.json());
+// Giới hạn mặc định của express.json (100kb) không đủ cho ảnh selfie nén dạng
+// base64 (~150-400KB thường gặp, cộng thêm ~33% do base64). Nới lên 4mb làm
+// biên an toàn; savePhoto() ở db.js còn tự chặn ảnh vượt PHOTO_MAX_BYTES.
+app.use(express.json({ limit: '4mb' }));
 // Cờ "secure" phải bám theo giao thức THẬT của từng request.
 // Render kết thúc TLS ở proxy rồi chuyển tiếp bằng HTTP, nên nếu đặt cứng
 // secure=true theo NODE_ENV thì cookie bị bỏ im lặng: đăng nhập trả về ok
@@ -68,6 +71,24 @@ function requireKey(req, res, next) {
     D.audit(req.user, 'key_wrong', null, req.ip);
     return res.status(403).json({ ok: false, key_required: true, message: r.message });
   }
+  next();
+}
+
+/* Bắt buộc ảnh chụp trực tiếp (selfie) ở lên ca / xuống ca / điểm danh.
+   Ảnh phải chụp SỐNG bằng camera ngay trong app (getUserMedia), không cho
+   chọn ảnh có sẵn từ thư viện — mục đích là chặn việc nhờ người khác bấm hộ
+   dù có đúng mã cá nhân. Lưu ảnh TRƯỚC, gắn đường dẫn vào req để hàm nghiệp
+   vụ (punch/answerRollCall) lưu cùng bản ghi. */
+function requirePhoto(req, res, next) {
+  if (req.user.role !== 'staff') return next();
+  const photo = (req.body || {}).photo;
+  if (!photo) {
+    return res.status(400).json({ ok: false, photo_required: true,
+      message: 'Cần chụp ảnh trực tiếp để xác nhận có mặt.' });
+  }
+  const r = D.savePhoto(req.user.id, req._photoTag || 'chamcong', photo);
+  if (!r.ok) return res.status(400).json({ ok: false, photo_required: true, message: r.message });
+  req.photoPath = r.path;
   next();
 }
 
@@ -665,17 +686,28 @@ app.post('/api/report/no-activity', requireUser, (req, res) => {
 });
 
 /* --- Điểm danh ngẫu nhiên --- */
-app.post('/api/rollcall/answer', requireUser, (req, res) => {
-  const r = D.answerRollCall(req.user, (req.body || {}).key, req.ip);
-  res.status(r.ok ? 200 : 400).json({ ...r, state: D.stateFor(req.user) });
-});
+app.post('/api/rollcall/answer', requireUser,
+  (req, res, next) => { req._photoTag = 'diemdanh'; next(); }, requirePhoto,
+  (req, res) => {
+    const r = D.answerRollCall(req.user, (req.body || {}).key, req.ip, req.photoPath);
+    res.status(r.ok ? 200 : 400).json({ ...r, state: D.stateFor(req.user) });
+  });
 
 /* ============================================================
    CHẤM CÔNG CA / LỊCH SỬ / TRỄ / LỊCH OFF
    ============================================================ */
 
-/* --- Nhân viên bấm Lên ca / Xuống ca / Chấm công --- */
-app.post('/api/punch', requireUser, requireKey, async (req, res) => {
+/* --- Nhân viên bấm Lên ca / Xuống ca / Chấm công ---
+   Ảnh selfie chỉ bắt buộc cho 'in' và 'out' (lên ca / xuống ca). Loại 'log'
+   (chấm công tự do, nếu có dùng) không yêu cầu ảnh. */
+app.post('/api/punch', requireUser, requireKey,
+  (req, res, next) => {
+    const kind = String((req.body || {}).kind || '');
+    if (kind !== 'in' && kind !== 'out') return next();
+    req._photoTag = kind;
+    return requirePhoto(req, res, next);
+  },
+  async (req, res) => {
   const kind = String((req.body || {}).kind || '');
 
   // Chốt tuân thủ báo cáo — chỉ áp cho lên ca và xuống ca
@@ -688,7 +720,7 @@ app.post('/api/punch', requireUser, requireKey, async (req, res) => {
     }
   }
 
-  const r = D.punch(req.user, kind, req.ip, req.get('user-agent'));
+  const r = D.punch(req.user, kind, req.ip, req.get('user-agent'), req.photoPath);
 
   if (r.ok && kind === 'out') {
     const n = D.cancelPendingRollCalls(req.user.id);
@@ -950,6 +982,23 @@ app.put('/api/admin/users/:id/location', requireUser, requireAdmin, (req, res) =
   D.db.prepare('UPDATE users SET location=? WHERE id=?').run(loc, +req.params.id);
   D.audit(req.user, 'location_update', `#${req.params.id} -> ${loc}`, req.ip);
   res.json({ ok: true, message: `Đã đổi khu vực sang ${loc} (${D.tzOf(loc)}).`, users: D.allUsers(req.scope) });
+});
+
+/* --- Ảnh xác nhận có mặt (selfie) — chỉ quản trị xem, lọc theo scope brand.
+   table: 'punch' (lên ca/xuống ca) hoặc 'rollcall' (điểm danh). id là photo_id
+   trả về kèm dòng dữ liệu tương ứng ở các API lịch sử/điểm danh phía trên. */
+app.get('/api/admin/photo/:table/:id', requireUser, requireAdmin, (req, res) => {
+  const table = req.params.table === 'rollcall' ? 'roll_calls' : (req.params.table === 'punch' ? 'punches' : null);
+  if (!table) return res.status(400).json({ ok: false, message: 'Loại không hợp lệ.' });
+
+  const row = D.db.prepare(`SELECT r.photo_path, u.brand FROM ${table} r JOIN users u ON u.id=r.user_id WHERE r.id=?`)
+    .get(+req.params.id);
+  if (!row || !row.photo_path || !D.inScope(req.scope, row.brand)) {
+    return res.status(404).json({ ok: false, message: 'Không tìm thấy ảnh.' });
+  }
+  const abs = D.photoAbsPath(row.photo_path);
+  if (!abs) return res.status(404).json({ ok: false, message: 'Ảnh đã bị xoá hoặc không còn trên đĩa.' });
+  res.sendFile(abs);
 });
 
 /* ============================================================
