@@ -770,12 +770,36 @@ function shiftLog(f = {}, scope = null) {
     }
   }
 
-  const list = [...byKey.values()].map((o) => ({
-    ...o,
-    ot: (otOf(o.user_id, o.day) || {}).hours || 0,
-    duration_min: o.in_at && o.out_at ? Math.round((o.out_at - o.in_at) / 60000) : null,
-    missing_out: !!(o.in_at && !o.out_at),
-  })).sort((a, b) => (b.in_at || 0) - (a.in_at || 0));
+  const shiftRow = db.prepare('SELECT * FROM shift_days WHERE user_id=? AND day=?');
+  const userRow = db.prepare('SELECT location FROM users WHERE id=?');
+  const t = now();
+
+  const list = [...byKey.values()].map((o) => {
+    const ot = (otOf(o.user_id, o.day) || {}).hours || 0;
+
+    // Ca hôm đó kết thúc lúc nào — để phân biệt "đang trong ca" với "quên bấm ra"
+    let endAt = null;
+    const sr = shiftRow.get(o.user_id, o.day);
+    if (sr) {
+      const tz = tzOf((userRow.get(o.user_id) || {}).location);
+      const st = zonedToUtc(o.day, sr.start_hm, tz).getTime();
+      let en = zonedToUtc(o.day, sr.end_hm, tz).getTime();
+      if (en <= st) en += 24 * 3600000;          // ca qua đêm
+      endAt = en + ot * 3600000;
+    }
+
+    const chuaRa = !!(o.in_at && !o.out_at);
+    // Chưa hết ca thì là ĐANG TRỰC, không phải quên. Cho thêm 30 phút ân hạn.
+    const inProgress = chuaRa && (endAt === null ? true : t < endAt + 30 * 60000);
+
+    return {
+      ...o, ot, shift_end_at: endAt,
+      in_progress: inProgress,
+      duration_min: o.in_at && o.out_at ? Math.round((o.out_at - o.in_at) / 60000)
+                  : (inProgress ? Math.round((t - o.in_at) / 60000) : null),
+      missing_out: chuaRa && !inProgress,
+    };
+  }).sort((a, b) => (b.in_at || 0) - (a.in_at || 0));
 
   return {
     rows: list,
@@ -784,6 +808,7 @@ function shiftLog(f = {}, scope = null) {
       late_in: list.filter((x) => x.in_late).length,
       late_out: list.filter((x) => x.out_late).length,
       missing_out: list.filter((x) => x.missing_out).length,
+      in_progress: list.filter((x) => x.in_progress).length,
       ot_days: list.filter((x) => x.ot > 0).length,
     },
   };
