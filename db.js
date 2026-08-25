@@ -9,6 +9,11 @@ const bcrypt = require('bcryptjs');
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
+// Ảnh chụp xác nhận có mặt (selfie) — lưu trên đĩa, KHÔNG lưu trong SQLite.
+// Nằm cùng Persistent Disk với tramtruc.db nên không mất khi redeploy trên Render.
+const PHOTOS_DIR = path.join(DATA_DIR, 'photos');
+fs.mkdirSync(PHOTOS_DIR, { recursive: true });
+
 const db = new Database(path.join(DATA_DIR, 'tramtruc.db'));
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
@@ -193,6 +198,12 @@ CREATE TABLE IF NOT EXISTS report_exempt (
   if (!oc.includes('brand'))      db.exec('ALTER TABLE day_offs ADD COLUMN brand TEXT');
   if (!oc.includes('department')) db.exec('ALTER TABLE day_offs ADD COLUMN department TEXT');
   db.exec('CREATE INDEX IF NOT EXISTS idx_off_slot ON day_offs(brand, department, day)');
+
+  // Ảnh chụp xác nhận có mặt — lên ca, xuống ca, điểm danh ngẫu nhiên.
+  // Chỉ lưu ĐƯỜNG DẪN file trên đĩa, không lưu ảnh trong SQLite.
+  const pc = db.prepare('PRAGMA table_info(punches)').all().map((c) => c.name);
+  if (!pc.includes('photo_path')) db.exec('ALTER TABLE punches ADD COLUMN photo_path TEXT');
+  if (!rc.includes('photo_path')) db.exec('ALTER TABLE roll_calls ADD COLUMN photo_path TEXT');
 }
 
 /* ============================================================
@@ -577,7 +588,7 @@ function lateOf(kind, diffMin) {
   return null;
 }
 
-function punch(user, kind, ip, ua) {
+function punch(user, kind, ip, ua, photoPath) {
   if (!PUNCH_ACTIVE.includes(kind)) return { ok: false, message: 'Loại chấm công không hợp lệ.' };
 
   const st = shiftToday(user);
@@ -612,10 +623,10 @@ function punch(user, kind, ip, ua) {
   const hhmm = new Date(at).toLocaleTimeString('vi-VN', { hour12: false, timeZone: tz });
 
   db.prepare(`INSERT INTO punches
-    (user_id,kind,brand,department,scheduled_at,actual_at,late_minutes,late_level,ip,user_agent)
-    VALUES (?,?,?,?,?,?,?,?,?,?)`).run(
+    (user_id,kind,brand,department,scheduled_at,actual_at,late_minutes,late_level,ip,user_agent,photo_path)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(
     user.id, kind, user.brand, user.department, sched, at,
-    Math.max(0, diff), level, ip, (ua || '').slice(0, 400));
+    Math.max(0, diff), level, ip, (ua || '').slice(0, 400), photoPath || null);
 
   const gioLich = sched
     ? new Date(sched).toLocaleTimeString('vi-VN', { hour12: false, timeZone: tz }).slice(0, 5)
@@ -719,6 +730,7 @@ function punchHistory(f = {}, viewer = null) {
       scheduled_at: r.scheduled_at, actual_at: r.actual_at,
       late_minutes: r.late_minutes, late_level: r.late_level,
       late_label: r.late_level ? LATE_LEVELS[r.late_level].label : null, ip: r.ip,
+      photo_id: r.photo_path ? r.id : null,
     })),
     stats: {
       total: s.total || 0, in5: s.a || 0, in30: s.b || 0, out60: s.c || 0,
@@ -833,8 +845,9 @@ function rollCallByDay(userId, f = {}) {
      GROUP BY r.day ORDER BY r.day DESC LIMIT 60`).all(...p);
 
   const chiTiet = db.prepare(
-    `SELECT id, day, due_at, deadline_at, answered_at, status, is_makeup, defer_reason
-     FROM roll_calls WHERE ${w.join(' AND ')} ORDER BY day DESC, due_at DESC LIMIT 300`).all(...p);
+    `SELECT id, day, due_at, deadline_at, answered_at, status, is_makeup, defer_reason, photo_path
+     FROM roll_calls WHERE ${w.join(' AND ')} ORDER BY day DESC, due_at DESC LIMIT 300`).all(...p)
+    .map((r) => ({ ...r, photo_id: r.photo_path ? r.id : null, photo_path: undefined }));
 
   return { byDay: rows, items: chiTiet };
 }
@@ -1160,6 +1173,42 @@ function scheduleSummary(ym, scope = null) {
 }
 
 /* ============================================================
+   ẢNH CHỤP XÁC NHẬN CÓ MẶT
+   Bắt buộc kèm ảnh selfie (chụp trực tiếp bằng camera, không cho chọn từ thư
+   viện) khi lên ca, xuống ca, điểm danh ngẫu nhiên — chặn việc bấm hộ từ xa
+   chỉ bằng mã cá nhân. Ảnh nén ở phía trình duyệt trước khi gửi lên.
+   ============================================================ */
+const PHOTO_MAX_BYTES = 1.5 * 1024 * 1024; // ~1.5MB sau khi giải mã base64, đủ dư so với ảnh đã nén ở client
+
+function savePhoto(userId, tag, dataUrl) {
+  const s = String(dataUrl || '');
+  const m = /^data:image\/(png|jpe?g|webp);base64,([A-Za-z0-9+/=]+)$/.exec(s);
+  if (!m) return { ok: false, message: 'Ảnh chụp không hợp lệ. Thử chụp lại.' };
+
+  const buf = Buffer.from(m[2], 'base64');
+  if (buf.length < 500) return { ok: false, message: 'Ảnh chụp quá nhỏ hoặc bị lỗi. Thử chụp lại.' };
+  if (buf.length > PHOTO_MAX_BYTES) return { ok: false, message: 'Ảnh chụp quá nặng. Thử chụp lại.' };
+
+  const dir = path.join(PHOTOS_DIR, String(userId));
+  fs.mkdirSync(dir, { recursive: true });
+  const ext = m[1] === 'png' ? 'png' : (m[1] === 'webp' ? 'webp' : 'jpg');
+  const file = `${now()}_${tag}_${crypto.randomBytes(3).toString('hex')}.${ext}`;
+  fs.writeFileSync(path.join(dir, file), buf);
+
+  // Lưu path DẠNG TƯƠNG ĐỐI (userId/tenfile) — không phụ thuộc DATA_DIR tuyệt đối,
+  // để chuyển máy/deploy lại vẫn đọc đúng.
+  return { ok: true, path: `${userId}/${file}` };
+}
+
+function photoAbsPath(relPath) {
+  if (!relPath) return null;
+  const p = path.join(PHOTOS_DIR, relPath);
+  // Chặn path traversal — không cho relPath chứa ".." thoát khỏi PHOTOS_DIR
+  if (!p.startsWith(PHOTOS_DIR)) return null;
+  return fs.existsSync(p) ? p : null;
+}
+
+/* ============================================================
    MÃ CÁ NHÂN — lấy từ lương tháng trước, dạng 5 chữ số
    Quản lý nhập giúp từng người, hệ thống chỉ lưu bản băm.
    ============================================================ */
@@ -1351,15 +1400,15 @@ function activeRollCall(userId) {
   return rc;
 }
 
-function answerRollCall(user, key, ip) {
+function answerRollCall(user, key, ip, photoPath) {
   const rc = activeRollCall(user.id);
   if (!rc) return { ok: false, message: "Không có lượt điểm danh nào đang chờ." };
 
   const chk = checkPersonalKey(user, key);
   if (!chk.ok) return chk;
 
-  db.prepare("UPDATE roll_calls SET status='done', answered_at=?, ip=? WHERE id=?")
-    .run(now(), ip, rc.id);
+  db.prepare("UPDATE roll_calls SET status='done', answered_at=?, ip=?, photo_path=? WHERE id=?")
+    .run(now(), ip, photoPath || null, rc.id);
   return {
     ok: true,
     message: rc.is_makeup ? "Đã điểm danh bù xong." : "Đã điểm danh.",
@@ -1641,6 +1690,7 @@ function audit(actor, action, detail, ip) {
 
 module.exports = {
   db, DEPTS, BRANDS, AUTO_CLOSE_GRACE_MIN, newKey,
+  savePhoto, photoAbsPath,
   types, typeByCode, sweepStale, openFor, holderOf, lanes, present,
   startActivity, stopActivity, stateFor, history, allUsers, audit, lockKey,
   PUNCH_KINDS, PUNCH_ACTIVE, LATE_LEVELS, MAX_OFF_PER_MONTH,
