@@ -10,8 +10,10 @@ services:
     healthCheckPath: /healthz
     disk:
       name: data
-      mountPath: /var/data # SQLite nằm ở đây, sống sót qua mỗi lần deploy
-      sizeGB: 1
+      mountPath: /var/data # SQLite + ảnh xác nhận có mặt nằm ở đây, sống sót qua mỗi lần deploy
+      sizeGB: 5             # ảnh chụp cộng dồn theo ngày (~50-100KB/ảnh × nhiều lượt/người/ngày),
+                             # 1GB đầy nhanh nếu vài chục nhân viên dùng vài tháng. Tăng thêm nếu cần,
+                             # hoặc định kỳ dọn DATA_DIR/photos cho tháng cũ (xem README, mục Sao lưu).
     envVars:
       - key: NODE_VERSION
         value: "22"
@@ -33,7 +35,7 @@ services:
         value: "1"            # số người cùng bộ phận được nghỉ cùng một ngày
       # ── Quy tắc tính trễ ──
       - key: SHIFT_EARLY_MIN
-        value: "10"           # phải lên ca trước giờ ca bấy nhiêu phút
+        value: "0"            # 0 = mốc tính trễ là đúng giờ ca; >0 = bắt có mặt sớm
       - key: LATE_IN_MIN1
         value: "1"            # quá mốc từ bấy nhiêu phút là trễ nhẹ
       - key: LATE_IN_MIN2
