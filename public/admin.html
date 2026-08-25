@@ -481,6 +481,7 @@ async function loadRollCalls() {
       ? `<span class="pill" title="Huỷ vì đã xuống ca trước khi tới lượt">${x.da_huy}</span>`
       : '<span class="sub">—</span>'}</td>
     <td class="c">${x.tong ? Math.round((x.da_diem_danh / x.tong) * 100) + '%' : '—'}</td>
+    <td><button class="btn btn-sm" onclick="rcDetail(${x.id},'${esc(x.user_name).replace(/'/g, "\\'")}')">Xem lượt</button></td>
   </tr>`).join('');
 
   $('#pr').innerHTML = `
@@ -531,13 +532,77 @@ async function loadRollCalls() {
       <thead><tr><th class="wide">Nhân viên</th><th class="c">Tổng lượt</th>
         <th class="c">Đã điểm danh</th><th class="c">Vắng</th>
         <th class="c">Lượt bù</th><th class="c">Đang chờ</th>
-        <th class="c">Thủ công</th><th class="c">Đã huỷ</th><th class="c">Tỉ lệ</th></tr></thead>
-      <tbody>${trs || `<tr><td colspan="9" class="empty">
+        <th class="c">Thủ công</th><th class="c">Đã huỷ</th><th class="c">Tỉ lệ</th><th></th></tr></thead>
+      <tbody>${trs || `<tr><td colspan="10" class="empty">
         Chưa có lượt điểm danh nào.<br>
         <span class="sub">Hệ thống chỉ sinh điểm danh cho người <b>đang trong ca theo lịch</b>.
         Chưa nhập lịch ca tháng thì không có lượt nào.</span></td></tr>`}</tbody>
     </table></div>
     <div class="sub" style="margin-top:10px">Xếp theo số lượt vắng giảm dần</div>`;
+}
+
+/* Chi tiết từng lượt điểm danh của một người — kèm nút xem ảnh xác nhận */
+async function rcDetail(userId, name) {
+  const modal = document.createElement('div');
+  modal.className = 'cam-modal';
+  modal.innerHTML = `<div class="cam-box" style="max-width:640px;width:min(640px,94vw)">
+    <div class="cam-h"><span>Các lượt điểm danh của ${esc(name)}</span>
+      <button class="x" id="rcClose">×</button></div>
+    <div style="padding:var(--s4) var(--s5);max-height:70vh;overflow:auto" id="rcBody">
+      <div class="empty">Đang tải…</div>
+    </div>
+  </div>`;
+  document.body.appendChild(modal);
+  modal.querySelector('#rcClose').onclick = () => modal.remove();
+  modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
+
+  const STATUS_LABEL = {
+    done: '<span class="pill pri">Đã điểm danh</span>',
+    missed: '<span class="pill red">Vắng</span>',
+    pending: '<span class="pill amb">Đang chờ</span>',
+    waiting: '<span class="pill">Chờ dừng hoạt động</span>',
+    deferred: '<span class="pill">Đã hoãn</span>',
+    cancelled: '<span class="sub">Đã huỷ</span>',
+  };
+
+  let d;
+  try {
+    const r = await fetch(`/api/admin/rollcalls/detail?user_id=${userId}`);
+    d = await r.json();
+  } catch (e) {
+    modal.querySelector('#rcBody').innerHTML = '<div class="empty">Không tải được dữ liệu.</div>';
+    return;
+  }
+  const items = d.items || [];
+  modal.querySelector('#rcBody').innerHTML = items.length
+    ? `<div class="tw" style="border:none"><table>
+        <thead><tr><th>Ngày</th><th>Tới hạn</th><th>Trạng thái</th><th>Ảnh</th></tr></thead>
+        <tbody>${items.map(x => `<tr>
+          <td class="sub">${x.day}</td>
+          <td class="sub mono">${x.due_at ? hms(x.due_at).slice(0, 5) : '—'}</td>
+          <td>${STATUS_LABEL[x.status] || x.status}${x.is_makeup ? ' <span class="pill amb">Bù</span>' : ''}</td>
+          <td>${x.photo_id
+            ? `<button class="btn btn-sm" onclick="viewPhoto('rollcall',${x.photo_id})">Xem</button>`
+            : '<span class="sub">—</span>'}</td>
+        </tr>`).join('')}</tbody>
+      </table></div>`
+    : '<div class="empty">Chưa có lượt điểm danh nào.</div>';
+}
+
+/* Mở ảnh xác nhận (selfie) trong lightbox nhỏ. table: 'punch' | 'rollcall' */
+function viewPhoto(table, id) {
+  const modal = document.createElement('div');
+  modal.className = 'cam-modal';
+  modal.innerHTML = `<div class="cam-box" style="max-width:420px">
+    <div class="cam-h"><span>Ảnh xác nhận có mặt</span><button class="x" id="phClose">×</button></div>
+    <div class="cam-view" style="aspect-ratio:1/1">
+      <img src="/api/admin/photo/${table}/${id}" style="width:100%;height:100%;object-fit:cover"
+        onerror="this.parentElement.innerHTML='<div class=&quot;cam-err&quot;>Không tải được ảnh — có thể đã bị xoá.</div>'">
+    </div>
+  </div>`;
+  document.body.appendChild(modal);
+  modal.querySelector('#phClose').onclick = () => modal.remove();
+  modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
 }
 
 async function fireRollCall() {
@@ -839,7 +904,10 @@ function punchTable(d, showLateFilter) {
       ? `<span class="pill ${r.late_level === 'in5' ? 'amb' : 'red'}">${r.late_label}</span>
          <div class="sub" style="margin-top:4px">${r.late_minutes} phút</div>`
       : '<span class="pill pri">Đúng giờ</span>'}</td>
-    <td class="sub">${r.ip || '—'}</td></tr>`).join('');
+    <td class="sub">${r.ip || '—'}</td>
+    <td>${r.photo_id
+      ? `<button class="btn btn-sm" onclick="viewPhoto('punch',${r.photo_id})">Xem ảnh</button>`
+      : '<span class="sub">—</span>'}</td></tr>`).join('');
 
   return `
     <div class="kpis">
@@ -851,8 +919,8 @@ function punchTable(d, showLateFilter) {
     ${punchFilters(d, 'punch')}
     <div class="tw"><table>
       <thead><tr><th class="wide">Nhân viên</th><th>Loại</th><th>Giờ bấm</th><th>Theo lịch</th>
-        <th>Mức trễ</th><th>IP</th></tr></thead>
-      <tbody>${trs || `<tr><td colspan="6" class="empty">${showLateFilter
+        <th>Mức trễ</th><th>IP</th><th>Ảnh</th></tr></thead>
+      <tbody>${trs || `<tr><td colspan="7" class="empty">${showLateFilter
         ? 'Không có ai trễ theo bộ lọc này.' : 'Chưa có bản ghi chấm công nào.'}</td></tr>`}</tbody>
     </table></div>
     <div class="sub" style="margin-top:10px">${d.rows.length} bản ghi hiển thị</div>`;
@@ -987,6 +1055,9 @@ async function lateDetail(userId, name) {
     <td style="text-align:right;font-weight:700">${r.late_minutes} phút</td>
     <td class="sub">${r.department || '—'}${r.brand ? ' · ' + r.brand : ''}</td>
     <td class="sub">${r.ip || '—'}</td>
+    <td>${r.photo_id
+      ? `<button class="btn btn-sm" onclick="viewPhoto('punch',${r.photo_id})">Xem ảnh</button>`
+      : '<span class="sub">—</span>'}</td>
   </tr>`).join('');
 
   const tổngPhút = rows.reduce((n, r) => n + (r.late_minutes || 0), 0);
@@ -999,8 +1070,8 @@ async function lateDetail(userId, name) {
     </div>
     <div class="tw"><table>
       <thead><tr><th>Ngày</th><th>Giờ bấm</th><th>Loại</th><th>Theo lịch</th>
-        <th>Mức trễ</th><th class="r">Trễ</th><th>Bộ phận</th><th>IP</th></tr></thead>
-      <tbody>${trs || '<tr><td colspan="8" class="empty">Không có lượt trễ nào khớp bộ lọc.</td></tr>'}</tbody>
+        <th>Mức trễ</th><th class="r">Trễ</th><th>Bộ phận</th><th>IP</th><th>Ảnh</th></tr></thead>
+      <tbody>${trs || '<tr><td colspan="9" class="empty">Không có lượt trễ nào khớp bộ lọc.</td></tr>'}</tbody>
     </table></div>`;
 }
 
