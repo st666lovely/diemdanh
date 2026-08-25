@@ -506,25 +506,7 @@ async function turnOnSound() {
     Notification && Notification.permission === 'granted'
       ? 'Máy sẽ chuông, rung và hiện thông báo khi tới lượt.'
       : 'Máy sẽ chuông và rung. Cho phép thông báo để kêu cả khi tắt màn hình.', true);
-  render();
-}
-
-function installCard() {
-  if (isStandalone) return '';
-  if (localStorage.getItem('tt_hide_install') === '1') return '';
-  return `<div class="card note-card good">
-    <div class="ic">⌂</div>
-    <div class="m">
-      <div class="a">Cài lên màn hình chính</div>
-      <div class="b">${isIOS
-        ? 'Bấm nút Chia sẻ ở thanh dưới → “Thêm vào MH chính”.'
-        : 'Mở menu ⋮ của trình duyệt → “Cài đặt ứng dụng” / “Thêm vào màn hình chính”.'}
-        </div>
-    </div>
-    <button class="x" onclick="hideInstall()" aria-label="Ẩn">×</button>
-  </div>`;
-}
-function hideInstall() { localStorage.setItem('tt_hide_install', '1'); render(); }
+  render();  }
 
 /* Thẻ điểm danh: hiện khi có lượt đang chờ trả lời. Đặt trên cùng, màu đỏ,
    kèm đồng hồ đếm ngược tới hạn chót. */
