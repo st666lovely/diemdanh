@@ -290,11 +290,17 @@ function renderUsers() {
         <span class="mono">Ten</span>. Các cột <span class="mono">KhuVuc</span>,
         <span class="mono">BoPhan</span>, <span class="mono">Brand</span>,
         <span class="mono">MaCaNhan</span>, <span class="mono">ThangLuong</span> là tuỳ chọn.
-        <b>Định dạng cột MaCaNhan thành Text</b>, nếu không Excel cắt mất số 0 đầu.
+        <b>Định dạng cột MaCaNhan thành Text</b>, nếu không Excel cắt mất số 0 đầu.<br>
+        <b>Người chưa có trong hệ thống sẽ được tự tạo mới</b> theo tên trong file — không cần
+        thêm tay trước. Nếu file thiếu cột Bộ phận/Brand cho người mới, vào bảng bên dưới
+        sửa lại sau khi nhập.
       </div>
     </div>
 
-    <div class="card card-p" style="margin-bottom:12px">
+    <div class="card card-p" style="margin-bottom:16px">
+      <div style="font-size:11.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--tx-3);margin-bottom:10px">
+        Thêm một người thủ công — tách biệt với việc nhập lịch bằng file ở trên
+      </div>
       <div class="row">
         <div class="f"><label>Tên nhân viên</label><input id="nn" placeholder="Nguyễn Thu Hà"></div>
         <div class="f" style="max-width:170px"><label>Bộ phận</label><select id="nd">${depOpts}</select></div>
@@ -302,15 +308,6 @@ function renderUsers() {
           <select id="nb" ${scoped ? 'disabled title="Bạn chỉ thêm được người của brand mình"' : ''}>${brOpts}</select></div>
         <button class="btn btn-pri" onclick="addU()">Thêm</button>
       </div>
-    </div>
-
-    <div class="card card-p" style="margin-bottom:16px">
-      <div style="font-size:11.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--tx-3);margin-bottom:10px">
-        Thêm hàng loạt — mỗi dòng: Tên | Bộ phận | Brand</div>
-      <textarea id="bk" rows="6" placeholder="Nguyễn Thu Hà | CS | AE
-Trần Minh Anh | CS | AE
-Đỗ Thanh Tùng | VIP | ST"></textarea>
-      <button class="btn btn-pri" style="margin-top:10px" onclick="bulk()">Thêm tất cả</button>
     </div>
 
     <div class="tw"><table>
@@ -397,13 +394,15 @@ async function schImport(mode) {
   if (r.preview) {
     parts.push(`<b>Xem trước tháng ${r.ym}:</b> ${r.count} người · ${r.dayCount} ngày làm`
       + (r.keyCount ? ` · ${r.keyCount} mã cá nhân` : ' · không có mã cá nhân nào') + '.');
-    if (r.matched.length) parts.push(`Khớp: ${r.matched.slice(0, 10).map(esc).join(', ')}${r.matched.length > 10 ? '…' : ''}`);
+    if (r.matched.length) parts.push(`Đã có trong hệ thống: ${r.matched.slice(0, 10).map(esc).join(', ')}${r.matched.length > 10 ? '…' : ''}`);
+    if (r.missing && r.missing.length)
+      parts.push(`<b style="color:var(--amb)">Người mới, sẽ tự tạo khi bấm Merge/Ghi đè (${r.missing.length}):</b> ${r.missing.map(esc).join(', ')}`);
   } else {
     parts.push(`<b style="color:var(--pri)">${esc(r.message)}</b>`);
     toast('Đã áp lịch', r.message, true);
+    if (r.created && r.created.length)
+      parts.push(`<b style="color:var(--pri)">Đã tự tạo mới ${r.created.length} người:</b> ${r.created.map(esc).join(', ')} — kiểm tra lại Bộ phận/Brand của họ ở bảng dưới nếu file không có 2 cột đó.`);
   }
-  if (r.missing && r.missing.length)
-    parts.push(`<b style="color:var(--red)">Không tìm thấy ${r.missing.length} người trong danh sách:</b> ${r.missing.map(esc).join(', ')} — thêm họ vào bên dưới rồi nhập lại.`);
   if (r.errors && r.errors.length)
     parts.push(`<b style="color:var(--amb)">${r.errors.length} ô có vấn đề (đã coi là nghỉ):</b><br>${r.errors.slice(0, 6).map(esc).join('<br>')}${r.errors.length > 6 ? '<br>…' : ''}`);
 
@@ -428,14 +427,6 @@ async function addU() {
     body: { name: $('#nn').value, department: $('#nd').value, brand: $('#nb').value } });
   toast(r.ok ? 'Đã thêm' : 'Không thêm được', r.message || '', !!r.ok);
   if (r.ok) { $('#nn').value = ''; load(); }
-}
-
-async function bulk() {
-  const r = await api('/api/admin/users/bulk', { method: 'POST', body: { text: $('#bk').value } });
-  if (!r.ok) return toast('Không thêm được', r.message || '', false);
-  toast(`Đã thêm ${r.created.length} nhân viên`,
-    r.skipped.length ? `Bỏ qua ${r.skipped.length}: ${r.skipped.slice(0,2).join('; ')}` : 'Bấm “Chép link” để gửi cho từng người.', true);
-  $('#bk').value = ''; load();
 }
 
 async function post(id, what) {
