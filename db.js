@@ -1090,19 +1090,35 @@ function setLock(ym, locked) {
    ============================================================ */
 function applySchedule(parsed, mode = 'merge', scope = null) {
   const { ym, rows } = parsed;
-  const matched = [], missing = [], outside = [], keySet = [];
+  const matched = [], created = [], skipped = [], outside = [], keySet = [];
 
   const byKey = db.prepare("SELECT * FROM users WHERE key=? AND role='staff'");
   const byName = db.prepare("SELECT * FROM users WHERE name=? AND role='staff'");
+  const insUser = db.prepare(`INSERT INTO users (name,key,department,brand,location,role,created_at)
+                               VALUES (?,?,?,?,?,'staff',?)`);
 
-  const resolved = rows.map((r) => {
-    const u = (r.key && byKey.get(r.key.toUpperCase())) || (r.name && byName.get(r.name)) || null;
-    if (!u) { missing.push(r.name || r.key); return null; }
+  // Người có trong file nhưng chưa có tài khoản -> TỰ TẠO MỚI, không bắt phải
+  // thêm tay trước rồi mới nhập lịch được. Bộ phận/Brand lấy từ file nếu có,
+  // brand ép theo scope của admin đang nhập (an toàn hơn tin theo file).
+  const resolveOne = (r) => {
+    let u = (r.key && byKey.get(r.key.toUpperCase())) || (r.name && byName.get(r.name)) || null;
+    if (!u) {
+      if (!r.name) { skipped.push(r.key || '(dòng không có tên)'); return null; }
+
+      const dep = DEPTS.includes(String(r.department).toUpperCase()) ? String(r.department).toUpperCase() : null;
+      const loc = LOCATIONS.includes(String(r.location).toUpperCase()) ? String(r.location).toUpperCase() : 'VN';
+      const br = scope !== null ? scope
+        : (BRANDS.includes(String(r.brand).toUpperCase()) ? String(r.brand).toUpperCase() : null);
+
+      const info = insUser.run(r.name, newKey(), dep, br, loc, now());
+      u = { id: info.lastInsertRowid, name: r.name, brand: br, department: dep, location: loc };
+      created.push(r.name);
+    }
     // Admin của brand này không được đụng vào người của brand kia
     if (!inScope(scope, u.brand)) { outside.push(u.name); return null; }
     matched.push(u.name);
     return { user: u, rec: r };
-  }).filter(Boolean);
+  };
 
   const delMonth = db.prepare("DELETE FROM shift_days WHERE day LIKE ?");
   const delUser = db.prepare("DELETE FROM shift_days WHERE user_id=? AND day LIKE ?");
@@ -1111,6 +1127,8 @@ function applySchedule(parsed, mode = 'merge', scope = null) {
 
   let dayCount = 0;
   db.transaction(() => {
+    const resolved = rows.map(resolveOne).filter(Boolean);
+
     if (mode === 'replace') {
       // Ghi đè chỉ xoá lịch của người trong phạm vi, không đụng brand khác
       if (scope === null) delMonth.run(ym + '%');
@@ -1123,6 +1141,8 @@ function applySchedule(parsed, mode = 'merge', scope = null) {
       if (mode !== 'replace') delUser.run(user.id, ym + '%');
 
       // File cũng là nguồn cập nhật khu vực / bộ phận / brand nếu có ghi
+      // (người vừa tự tạo ở trên đã có sẵn giá trị từ file, dòng này chỉ có
+      // tác dụng thêm với người ĐÃ có tài khoản từ trước).
       const loc = LOCATIONS.includes(String(rec.location).toUpperCase())
         ? String(rec.location).toUpperCase() : user.location;
       const dep = DEPTS.includes(String(rec.department).toUpperCase())
@@ -1147,7 +1167,7 @@ function applySchedule(parsed, mode = 'merge', scope = null) {
     }
   })();
 
-  return { ym, mode, matched, missing, outside, keySet, dayCount, errors: parsed.errors };
+  return { ym, mode, matched, created, skipped, outside, keySet, dayCount, errors: parsed.errors };
 }
 
 /* Lịch tháng của một người, để hiển thị */
