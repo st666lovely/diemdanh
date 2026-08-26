@@ -64,6 +64,34 @@ function requireUser(req, res, next) {
 /* Bắt nhập mã cá nhân ở MỌI thao tác: lên ca, xuống ca, chấm công,
    bắt đầu và dừng rời vị trí. Mã lấy từ lương tháng trước nên không ai
    đưa cho đồng nghiệp, đó là lý do chọn nó. */
+/* ============================================================
+   CHẶN ĐIỆN THOẠI
+   Chấm công phải làm trên máy tính, vì chỉ máy tính mới chụp được màn hình
+   Trạm trực — bằng chứng đang ngồi tại máy làm việc. Điện thoại không có
+   tính năng đó nên bị chặn hẳn, kể cả mở đúng link.
+   Đặt ALLOW_MOBILE=1 nếu cần mở lại.
+   ============================================================ */
+const ALLOW_MOBILE = process.env.ALLOW_MOBILE === '1';
+const MOBILE_RE = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini|Mobile Safari|Windows Phone/i;
+
+function isMobile(req) {
+  if (ALLOW_MOBILE) return false;
+  const ua = req.get('user-agent') || '';
+  if (!MOBILE_RE.test(ua)) return false;
+  // Máy tính bảng iPad đời mới khai là Macintosh — trang tự nhận diện thêm ở phía trình duyệt
+  return true;
+}
+
+function blockMobile(req, res, next) {
+  if (req.user && req.user.role !== 'staff') return next();   // quản trị vẫn dùng được
+  if (!isMobile(req)) return next();
+  return res.status(403).json({
+    ok: false, mobile_blocked: true,
+    message: 'Chấm công phải làm trên máy tính. Mở link này bằng máy tính ở chỗ làm, '
+           + 'vì hệ thống cần ảnh chụp màn hình Trạm trực để xác nhận bạn đang tại máy.',
+  });
+}
+
 function requireKey(req, res, next) {
   if (req.user.role !== 'staff') return next();
   const r = D.checkPersonalKey(req.user, (req.body || {}).key);
@@ -81,7 +109,8 @@ function requireKey(req, res, next) {
    vụ (punch/answerRollCall) lưu cùng bản ghi. */
 function requirePhoto(req, res, next) {
   if (req.user.role !== 'staff') return next();
-  const photo = (req.body || {}).photo;
+  const b = req.body || {};
+  const photo = b.photo;
   if (!photo) {
     return res.status(400).json({ ok: false, photo_required: true,
       message: 'Cần chụp ảnh trực tiếp để xác nhận có mặt.' });
@@ -89,6 +118,12 @@ function requirePhoto(req, res, next) {
   const r = D.savePhoto(req.user.id, req._photoTag || 'chamcong', photo);
   if (!r.ok) return res.status(400).json({ ok: false, photo_required: true, message: r.message });
   req.photoPath = r.path;
+
+  // Ảnh màn hình Trạm trực — tuỳ chọn, chỉ máy tính mới chụp được
+  if (b.screen) {
+    const s2 = D.savePhoto(req.user.id, (req._photoTag || 'chamcong') + '-man-hinh', b.screen);
+    if (s2.ok) req.screenPath = s2.path;
+  }
   next();
 }
 
@@ -133,6 +168,11 @@ app.get('/k/:key', (req, res) => {
   if (!u) {
     D.audit(null, 'key_invalid', key, req.ip);
     return res.redirect('/?e=nokey');
+  }
+
+  if (isMobile(req)) {
+    D.audit(u, 'mobile_blocked', (req.get('user-agent') || '').slice(0, 160), req.ip);
+    return res.redirect('/?e=mobile');
   }
 
   req.session.uid = u.id;
@@ -206,7 +246,7 @@ app.get('/api/state', requireUser, (req, res) => {
   });
 });
 
-app.post('/api/start', requireUser, requireKey, (req, res) => {
+app.post('/api/start', requireUser, blockMobile, requireKey, (req, res) => {
   const r = D.startActivity(req.user, String((req.body || {}).code || ''), req.ip, req.get('user-agent'));
 
   // Vừa rời vị trí mà đang có lượt điểm danh chờ -> hoãn ngay, không để họ bị tính vắng
@@ -223,7 +263,7 @@ app.post('/api/start', requireUser, requireKey, (req, res) => {
   res.status(r.ok ? 200 : 409).json({ ...r, state: D.stateFor(req.user) });
 });
 
-app.post('/api/stop', requireUser, requireKey, (req, res) => {
+app.post('/api/stop', requireUser, blockMobile, requireKey, (req, res) => {
   const r = D.stopActivity(req.user, 'staff');
   // Trong lúc rời vị trí có lượt điểm danh nào bị hoãn thì giờ bắn bù
   if (r.ok) {
@@ -356,7 +396,7 @@ app.post('/api/admin/shift-hours/bulk', requireUser, requireAdmin, (req, res) =>
 });
 
 /* --- Làm thêm giờ --- */
-app.post('/api/ot', requireUser, requireKey, (req, res) => {
+app.post('/api/ot', requireUser, blockMobile, requireKey, (req, res) => {
   const b = req.body || {};
   const r = D.setOT(req.user, b.hours, b.reason, false);
   if (r.ok) D.audit(req.user, 'ot_set', `${b.hours}h · ${b.reason || ''}`, req.ip);
@@ -662,10 +702,10 @@ app.post('/api/report/no-activity', requireUser, (req, res) => {
 });
 
 /* --- Điểm danh ngẫu nhiên --- */
-app.post('/api/rollcall/answer', requireUser,
+app.post('/api/rollcall/answer', requireUser, blockMobile,
   (req, res, next) => { req._photoTag = 'diemdanh'; next(); }, requirePhoto,
   (req, res) => {
-    const r = D.answerRollCall(req.user, (req.body || {}).key, req.ip, req.photoPath);
+    const r = D.answerRollCall(req.user, (req.body || {}).key, req.ip, req.photoPath, req.screenPath);
     res.status(r.ok ? 200 : 400).json({ ...r, state: D.stateFor(req.user) });
   });
 
@@ -676,7 +716,7 @@ app.post('/api/rollcall/answer', requireUser,
 /* --- Nhân viên bấm Lên ca / Xuống ca / Chấm công ---
    Ảnh selfie chỉ bắt buộc cho 'in' và 'out' (lên ca / xuống ca). Loại 'log'
    (chấm công tự do, nếu có dùng) không yêu cầu ảnh. */
-app.post('/api/punch', requireUser, requireKey,
+app.post('/api/punch', requireUser, blockMobile, requireKey,
   (req, res, next) => {
     const kind = String((req.body || {}).kind || '');
     if (kind !== 'in' && kind !== 'out') return next();
@@ -696,7 +736,7 @@ app.post('/api/punch', requireUser, requireKey,
     }
   }
 
-  const r = D.punch(req.user, kind, req.ip, req.get('user-agent'), req.photoPath);
+  const r = D.punch(req.user, kind, req.ip, req.get('user-agent'), req.photoPath, req.screenPath);
 
   if (r.ok && kind === 'out') {
     const n = D.cancelPendingRollCalls(req.user.id);
@@ -781,7 +821,7 @@ app.get('/api/offs', requireUser, (req, res) => {
   res.json(D.myOffs(req.user, String(req.query.ym || thisYm())));
 });
 
-app.post('/api/offs/toggle', requireUser, (req, res) => {
+app.post('/api/offs/toggle', requireUser, blockMobile, (req, res) => {
   const r = D.toggleOff(req.user, String((req.body || {}).day || ''));
   res.status(r.ok ? 200 : 400).json(r);
 });
@@ -970,7 +1010,8 @@ app.get('/api/admin/photo/:table/:id', requireUser, requireAdmin, (req, res) => 
   const table = req.params.table === 'rollcall' ? 'roll_calls' : (req.params.table === 'punch' ? 'punches' : null);
   if (!table) return res.status(400).json({ ok: false, message: 'Loại không hợp lệ.' });
 
-  const row = D.db.prepare(`SELECT r.photo_path, u.brand FROM ${table} r JOIN users u ON u.id=r.user_id WHERE r.id=?`)
+  const col = req.query.kind === 'screen' ? 'screen_path' : 'photo_path';
+  const row = D.db.prepare(`SELECT r.${col} photo_path, u.brand FROM ${table} r JOIN users u ON u.id=r.user_id WHERE r.id=?`)
     .get(+req.params.id);
   if (!row || !row.photo_path || !D.inScope(req.scope, row.brand)) {
     return res.status(404).json({ ok: false, message: 'Không tìm thấy ảnh.' });
