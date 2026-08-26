@@ -309,30 +309,6 @@ app.post('/api/admin/users', requireUser, requireAdmin, (req, res) => {
   res.json({ ok: true, message: `Đã thêm ${name} vào ${brand}.`, users: D.allUsers(req.scope) });
 });
 
-app.post('/api/admin/users/bulk', requireUser, requireAdmin, (req, res) => {
-  const text = String((req.body || {}).text || '');
-  const ins = D.db.prepare(`INSERT INTO users (name,key,department,brand,role,created_at)
-                            VALUES (?,?,?,?,'staff',?)`);
-  const created = [], skipped = [];
-
-  D.db.transaction(() => {
-    for (const line of text.split('\n')) {
-      const p = line.split('|').map((s) => s.trim());
-      if (!p[0]) continue;
-      const dept = D.DEPTS.includes((p[1] || '').toUpperCase()) ? p[1].toUpperCase() : null;
-      let brand = D.BRANDS.includes((p[2] || '').toUpperCase()) ? p[2].toUpperCase() : null;
-      if (req.scope !== null) brand = req.scope;   // admin theo brand chỉ thêm được người của brand mình
-      if (!dept) { skipped.push(`${p[0]} — bộ phận không hợp lệ`); continue; }
-      if (!brand) { skipped.push(`${p[0]} — thiếu brand`); continue; }
-      ins.run(p[0], D.newKey(), dept, brand, Date.now());
-      created.push(p[0]);
-    }
-  })();
-
-  D.audit(req.user, 'user_bulk', `${created.length} người`, req.ip);
-  res.json({ ok: true, created, skipped, users: D.allUsers(req.scope) });
-});
-
 app.put('/api/admin/users/:id', requireUser, requireAdmin, (req, res) => {
   const b = req.body || {};
   const u = targetUser(req, res); if (!u) return;
@@ -953,14 +929,17 @@ app.post('/api/admin/schedule/import',
     }
 
     const r = D.applySchedule(parsed, mode, req.scope);
-    D.audit(req.user, 'schedule_import', `${r.ym} ${mode} ${r.matched.length} người / ${r.dayCount} ngày`, req.ip);
+    D.audit(req.user, 'schedule_import',
+      `${r.ym} ${mode} ${r.matched.length} người / ${r.dayCount} ngày`
+      + (r.created.length ? ` (tự tạo mới ${r.created.length})` : ''), req.ip);
 
     res.json({
       ok: true, ...r,
       message: `Đã áp lịch tháng ${r.ym} (${mode === 'replace' ? 'ghi đè' : 'merge'}): `
         + `${r.matched.length} người, ${r.dayCount} ngày làm.`
+        + (r.created.length ? ` Tự tạo mới ${r.created.length} người: ${r.created.slice(0, 5).join(', ')}${r.created.length > 5 ? '…' : ''}.` : '')
         + (r.keySet.length ? ` Đặt mã cá nhân cho ${r.keySet.length} người.` : '')
-        + (r.missing.length ? ` Không khớp ${r.missing.length} người: ${r.missing.slice(0, 5).join(', ')}.` : ''),
+        + (r.skipped.length ? ` Bỏ qua ${r.skipped.length} dòng không có tên: ${r.skipped.slice(0, 5).join(', ')}.` : ''),
     });
   });
 
