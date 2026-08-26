@@ -263,8 +263,23 @@ app.post('/api/start', requireUser, blockMobile, requireKey, (req, res) => {
   res.status(r.ok ? 200 : 409).json({ ...r, state: D.stateFor(req.user) });
 });
 
-app.post('/api/stop', requireUser, blockMobile, requireKey, (req, res) => {
-  const r = D.stopActivity(req.user, 'staff');
+/* Dừng hoạt động chỉ cần ảnh MÀN HÌNH — không cần webcam.
+   Mục đích là chứng minh đã quay lại máy, không phải xác minh danh tính lần nữa. */
+function requireScreen(req, res, next) {
+  if (req.user.role !== 'staff') return next();
+  const sc = (req.body || {}).screen;
+  if (!sc) {
+    return res.status(400).json({ ok: false, screen_required: true,
+      message: 'Cần ảnh chụp màn hình Trạm trực để xác nhận đã quay lại máy.' });
+  }
+  const r = D.savePhoto(req.user.id, 'dung-hoat-dong-man-hinh', sc);
+  if (!r.ok) return res.status(400).json({ ok: false, screen_required: true, message: r.message });
+  req.screenPath = r.path;
+  next();
+}
+
+app.post('/api/stop', requireUser, blockMobile, requireKey, requireScreen, (req, res) => {
+  const r = D.stopActivity(req.user, 'staff', null, req.screenPath);
   // Trong lúc rời vị trí có lượt điểm danh nào bị hoãn thì giờ bắn bù
   if (r.ok) {
     const n = D.releaseMakeups(req.user.id);
@@ -1007,8 +1022,12 @@ app.put('/api/admin/users/:id/location', requireUser, requireAdmin, (req, res) =
    table: 'punch' (lên ca/xuống ca) hoặc 'rollcall' (điểm danh). id là photo_id
    trả về kèm dòng dữ liệu tương ứng ở các API lịch sử/điểm danh phía trên. */
 app.get('/api/admin/photo/:table/:id', requireUser, requireAdmin, (req, res) => {
-  const table = req.params.table === 'rollcall' ? 'roll_calls' : (req.params.table === 'punch' ? 'punches' : null);
+  const table = { rollcall: 'roll_calls', punch: 'punches', activity: 'activities' }[req.params.table];
   if (!table) return res.status(400).json({ ok: false, message: 'Loại không hợp lệ.' });
+  // Hoạt động chỉ có ảnh màn hình, không có ảnh webcam
+  if (table === 'activities' && req.query.kind !== 'screen') {
+    return res.status(404).json({ ok: false, message: 'Hoạt động chỉ lưu ảnh màn hình.' });
+  }
 
   const col = req.query.kind === 'screen' ? 'screen_path' : 'photo_path';
   const row = D.db.prepare(`SELECT r.${col} photo_path, u.brand FROM ${table} r JOIN users u ON u.id=r.user_id WHERE r.id=?`)
