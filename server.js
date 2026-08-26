@@ -300,7 +300,10 @@ app.get('/api/admin/board', requireUser, requireAdmin, (req, res) => {
     server_time: Date.now(),
     me: { name: req.user.name, role: req.user.role, brand: req.user.brand },
     scope: req.scope,
-    lanes: D.lanes(req.scope), users: D.allUsers(req.scope), types: D.types(),
+    lanes: D.lanes(req.scope),
+    users: D.allUsers(req.scope, req.query.ym || null),
+    staff_ym: req.query.ym || new Date().toISOString().slice(0, 7),
+    types: D.types(),
     departments: D.DEPTS, brands: req.scope ? [req.scope] : D.BRANDS,
     ...D.history(req.query, req.scope),
   });
