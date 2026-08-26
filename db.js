@@ -769,16 +769,19 @@ function shiftLog(f = {}, scope = null) {
         department: r.department, brand: r.brand, day,
         in_at: null, out_at: null, in_late: null, in_late_min: 0,
         out_late: null, out_late_min: 0, in_sched: null, out_sched: null,
+        in_photo_id: null, out_photo_id: null,
       });
     }
     const o = byKey.get(k);
     if (r.kind === 'in' && (!o.in_at || r.actual_at < o.in_at)) {
       o.in_at = r.actual_at; o.in_sched = r.scheduled_at;
       o.in_late = r.late_level; o.in_late_min = r.late_minutes;
+      o.in_photo_id = r.photo_path ? r.id : null;
     }
     if (r.kind === 'out' && (!o.out_at || r.actual_at > o.out_at)) {
       o.out_at = r.actual_at; o.out_sched = r.scheduled_at;
       o.out_late = r.late_level; o.out_late_min = r.late_minutes;
+      o.out_photo_id = r.photo_path ? r.id : null;
     }
   }
 
