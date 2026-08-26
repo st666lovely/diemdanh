@@ -36,11 +36,21 @@
     </div>
     <canvas id="camCanvas" hidden></canvas>
     <div class="cam-actions" id="camActionsShoot">
-      <button class="btn btn-dark btn-block btn-lg" id="camShootBtn">📷 Chụp</button>
+      <div class="cam-row">
+        <button class="btn" id="camFlip" title="Đổi camera trước / sau">🔄 Đổi camera</button>
+        <button class="btn btn-dark btn-lg" id="camShootBtn" style="flex:2">📷 Chụp</button>
+      </div>
     </div>
     <div class="cam-actions" id="camActionsConfirm" hidden>
       <input id="camKey" class="cam-key" type="text" inputmode="text" autocomplete="off"
              placeholder="Nhập mã cá nhân" maxlength="32">
+      <div id="camScreenRow" class="cam-screen" hidden>
+        <div class="m">
+          <div class="a" id="camScreenState">Chưa chụp màn hình</div>
+          <div class="b">Chụp màn hình Trạm trực trên máy tính để xác nhận đang ngồi tại máy làm việc.</div>
+        </div>
+        <button class="btn" id="camScreenBtn">🖥️ Chụp màn hình</button>
+      </div>
       <div class="cam-row">
         <button class="btn btn-block" id="camRetake">Chụp lại</button>
         <button class="btn btn-pri btn-block" id="camConfirm">Xác nhận</button>
@@ -224,6 +234,10 @@ function toast(t, s, ok) {
 const GATES = {
   nokey:  { ic: '⊘', h: 'Link không hợp lệ',
     p: 'Link này không tồn tại hoặc đã bị thu hồi. Liên hệ quản lý để nhận link mới.' },
+  mobile: { ic: '🖥️', h: 'Phải dùng máy tính',
+    p: 'Chấm công chỉ làm được trên máy tính ở chỗ làm. Hệ thống cần ảnh chụp màn hình '
+     + 'Trạm trực để xác nhận bạn đang ngồi tại máy, mà điện thoại không chụp được màn hình. '
+     + 'Mở đúng link này trên máy tính.' },
   none:   { ic: '→', h: 'Cần link riêng để vào',
     p: 'Mở link quản lý đã gửi cho bạn. Lưu vào màn hình chính để lần sau vào thẳng, không phải nhập gì.' },
 };
@@ -250,20 +264,52 @@ function askKey(việc) {
    thư viện — mục đích chặn việc nhờ người khác bấm hộ dù có đúng mã cá nhân.
    Trả về { key, photo(dataURL) } hoặc null nếu người dùng huỷ. */
 const Cam = {
-  stream: null,
+  stream: null, screen: null,
+  // Điện thoại mặc định camera SAU: ảnh cho thấy chỗ ngồi và màn hình làm việc.
+  // Máy tính chỉ có camera trước nên dùng luôn cái đó.
+  facing: (navigator.maxTouchPoints > 1 ? 'environment' : 'user'),
+
+  isMobile() { return navigator.maxTouchPoints > 1; },
+  canCaptureScreen() {
+    return !!(navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia) && !this.isMobile();
+  },
+
+  async startStream() {
+    if (this.stream) { this.stream.getTracks().forEach((t) => t.stop()); this.stream = null; }
+    this.stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: this.facing }, width: { ideal: 640 }, height: { ideal: 640 } },
+      audio: false,
+    });
+    $('#camVideo').srcObject = this.stream;
+    // Chỉ soi gương khi dùng camera trước
+    $('#camVideo').style.transform = this.facing === 'user' ? 'scaleX(-1)' : 'none';
+  },
+
+  async flip() {
+    this.facing = this.facing === 'user' ? 'environment' : 'user';
+    try { await this.startStream(); }
+    catch (e) {
+      // Máy chỉ có một camera thì quay lại cái cũ
+      this.facing = this.facing === 'user' ? 'environment' : 'user';
+      try { await this.startStream(); } catch (e2) {}
+      toast('Máy chỉ có một camera', 'Không đổi được camera trên thiết bị này.', false);
+    }
+  },
+
   async open(title) {
     const modal = $('#camModal');
     $('#camTitle').textContent = title;
     $('#camShot').hidden = true; $('#camVideo').hidden = false;
     $('#camActionsShoot').hidden = false; $('#camActionsConfirm').hidden = true;
     $('#camErr').hidden = true; $('#camKey').value = '';
+    this.screen = null;
+    $('#camFlip').hidden = !this.isMobile();          // máy tính không có camera thứ hai
+    $('#camScreenRow').hidden = !this.canCaptureScreen();
+    $('#camScreenState').textContent = 'Chưa chụp màn hình';
+    $('#camScreenRow').classList.remove('done');
     modal.hidden = false;
     try {
-      this.stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 640 } },
-        audio: false,
-      });
-      $('#camVideo').srcObject = this.stream;
+      await this.startStream();
     } catch (e) {
       $('#camErr').hidden = false;
       $('#camErr').textContent = 'Không mở được camera. Vào Cài đặt trình duyệt cho phép '
@@ -274,6 +320,33 @@ const Cam = {
     if (this.stream) { this.stream.getTracks().forEach((t) => t.stop()); this.stream = null; }
     $('#camModal').hidden = true;
   },
+
+  /* Chụp màn hình Trạm trực trên máy tính. Trình duyệt sẽ hỏi chọn cửa sổ nào —
+     người dùng chọn tab Trạm trực. Điện thoại không hỗ trợ nên ẩn hẳn nút này. */
+  async shootScreen() {
+    try {
+      const st = await navigator.mediaDevices.getDisplayMedia({
+        video: { width: { ideal: 1280 }, height: { ideal: 800 } }, audio: false,
+      });
+      const v = document.createElement('video');
+      v.srcObject = st; v.muted = true; v.playsInline = true;
+      await v.play();
+      await new Promise((r) => setTimeout(r, 350));      // chờ khung hình đầu
+
+      const W = 960, H = Math.round(W * (v.videoHeight / v.videoWidth) || 600);
+      const c = document.createElement('canvas');
+      c.width = W; c.height = H;
+      c.getContext('2d').drawImage(v, 0, 0, W, H);
+      this.screen = c.toDataURL('image/jpeg', 0.6);
+
+      st.getTracks().forEach((t) => t.stop());
+      $('#camScreenState').textContent = 'Đã chụp màn hình ✓';
+      $('#camScreenRow').classList.add('done');
+    } catch (e) {
+      toast('Chưa chụp được màn hình',
+        'Bấm lại và chọn cửa sổ hoặc màn hình có trang Trạm trực.', false);
+    }
+  },
   shoot() {
     const v = $('#camVideo'), c = $('#camCanvas');
     if (!v.videoWidth) return; // camera chưa sẵn sàng
@@ -283,8 +356,8 @@ const Cam = {
     const ctx = c.getContext('2d');
     const side = Math.min(v.videoWidth, v.videoHeight);
     const sx = (v.videoWidth - side) / 2, sy = (v.videoHeight - side) / 2;
-    // Lật ngang cho giống ảnh soi gương — chỉ để hiển thị cho tự nhiên, không ảnh hưởng nội dung
-    ctx.translate(SZ, 0); ctx.scale(-1, 1);
+    // Camera trước thì lật cho giống soi gương; camera sau giữ nguyên chiều thật
+    if (this.facing === 'user') { ctx.translate(SZ, 0); ctx.scale(-1, 1); }
     ctx.drawImage(v, sx, sy, side, side, 0, 0, SZ, SZ);
     const dataUrl = c.toDataURL('image/jpeg', 0.62);
     $('#camShot').src = dataUrl; $('#camShot').hidden = false; $('#camVideo').hidden = true;
@@ -299,17 +372,24 @@ const Cam = {
 };
 $('#camClose').onclick = () => { Cam.close(); Cam._resolve && Cam._resolve(null); };
 $('#camShootBtn').onclick = () => Cam.shoot();
+$('#camFlip').onclick = () => Cam.flip();
+$('#camScreenBtn').onclick = () => Cam.shootScreen();
 $('#camRetake').onclick = () => Cam.retake();
 $('#camConfirm').onclick = () => {
   const key = $('#camKey').value.trim();
   if (S && S.key && S.key.required && !key) { $('#camKey').focus(); return; }
-  const photo = Cam._lastShot;
+  // Máy tính thì bắt buộc có ảnh màn hình
+  if (Cam.canCaptureScreen() && !Cam.screen) {
+    toast('Thiếu ảnh màn hình', 'Bấm "Chụp màn hình" và chọn cửa sổ Trạm trực.', false);
+    return;
+  }
+  const photo = Cam._lastShot, screen = Cam.screen;
   Cam.close();
-  Cam._resolve && Cam._resolve({ key, photo });
+  Cam._resolve && Cam._resolve({ key, photo, screen });
 };
 $('#camKey').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('#camConfirm').click(); });
 
-/* confirmWithPhoto(title) -> Promise<{key, photo} | null> */
+/* confirmWithPhoto(title) -> Promise<{key, photo, screen} | null> */
 function confirmWithPhoto(title) {
   return new Promise((resolve) => {
     Cam._resolve = resolve;
@@ -325,7 +405,16 @@ async function api(url, body, method) {
   return { status: r.status, ...(await r.json().catch(() => ({}))) };
 }
 
+/* Máy tính bảng đời mới khai là Macintosh nên máy chủ không nhận ra.
+   Kiểm tra thêm ở đây: có cảm ứng nhiều điểm và không có chuột = thiết bị di động. */
+function looksMobile() {
+  const chỉCảmỨng = navigator.maxTouchPoints > 1
+    && window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
+  return chỉCảmỨng;
+}
+
 async function load() {
+  if (looksMobile()) { showGate('mobile'); return; }
   const r = await fetch('/api/state');
   if (r.status === 401) { showGate(new URLSearchParams(location.search).get('e') || 'none'); return; }
   const d = await r.json();
@@ -354,21 +443,22 @@ async function act(url, body) {
 async function punch(kind) {
   if (busy) return;
   const tên = { in: 'lên ca', out: 'xuống ca' }[kind] || 'chấm công';
-  let key = '', photo = null;
+  let key = '', photo = null, screen = null;
   if (kind === 'in' || kind === 'out') {
     const c = await confirmWithPhoto(`Chụp ảnh để ${tên}`);
     if (!c) return;
-    key = c.key; photo = c.photo;
+    key = c.key; photo = c.photo; screen = c.screen;
   } else {
     const k = askKey(tên);
     if (k === null) return;
     key = k;
   }
   busy = true;
-  const r = await api('/api/punch', { kind, key, photo });
+  const r = await api('/api/punch', { kind, key, photo, screen });
   busy = false;
   if (r.photo_required) { toast('Cần ảnh chụp', r.message, false); return; }
   if (r.key_required) { toast('Mã cá nhân', r.message, false); return; }
+  if (r.mobile_blocked) { showGate('mobile'); return; }
   if (r.not_on_shift || r.already_in) { toast('Chưa thực hiện được', r.message, false); return; }
   if (r.report_required) {
     if (r.report) REP = r.report;
@@ -614,21 +704,8 @@ async function turnOnSound() {
   render();
 }
 
-function installCard() {
-  if (isStandalone) return '';
-  if (localStorage.getItem('tt_hide_install') === '1') return '';
-  return `<div class="card note-card good">
-    <div class="ic">⌂</div>
-    <div class="m">
-      <div class="a">Cài lên màn hình chính</div>
-      <div class="b">${isIOS
-        ? 'Bấm nút Chia sẻ ở thanh dưới → “Thêm vào MH chính”.'
-        : 'Mở menu ⋮ của trình duyệt → “Cài đặt ứng dụng” / “Thêm vào màn hình chính”.'}
-        </div>
-    </div>
-    <button class="x" onclick="hideInstall()" aria-label="Ẩn">×</button>
-  </div>`;
-}
+function installCard() { return ''; }   // không dùng điện thoại nữa
+
 function hideInstall() { localStorage.setItem('tt_hide_install', '1'); render(); }
 
 /* Thẻ điểm danh: hiện khi có lượt đang chờ trả lời. Đặt trên cùng, màu đỏ,
@@ -654,7 +731,7 @@ async function answerRollCall() {
   const c = await confirmWithPhoto('Chụp ảnh để điểm danh');
   if (!c) return;
   busy = true;
-  const r = await api('/api/rollcall/answer', { key: c.key, photo: c.photo });
+  const r = await api('/api/rollcall/answer', { key: c.key, photo: c.photo, screen: c.screen });
   busy = false;
   if (r.photo_required) { toast('Cần ảnh chụp', r.message, false); return; }
   if (r.ok) Alarm.stop();
