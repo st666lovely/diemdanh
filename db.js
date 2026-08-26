@@ -1706,16 +1706,18 @@ function shiftEndedToday(user) {
   return now() > c.end + REPORT_GRACE_MIN * 60000;
 }
 
-const allUsers = (scope = null) =>
+const allUsers = (scope = null, ym = null) =>
   db.prepare(
     `SELECT u.id,u.name,u.key,u.department,u.brand,u.location,u.role,u.is_active,
             u.device_id,u.device_seen_at,u.key_month,u.emp_code,
             u.default_start,u.default_end,u.shift_hours,
             CASE WHEN u.key_hash IS NULL THEN 0 ELSE 1 END has_key,
-            (SELECT COUNT(*) FROM shift_days s WHERE s.user_id=u.id AND s.day LIKE ?) work_days
+            (SELECT COUNT(*) FROM shift_days s WHERE s.user_id=u.id AND s.day LIKE ?) work_days,
+            (SELECT COUNT(*) FROM day_offs d WHERE d.user_id=u.id AND d.day LIKE ?) off_days
      FROM users u WHERE (? IS NULL OR u.brand=? OR u.role='super')
      ORDER BY u.role DESC, u.location, u.department, u.name`
-  ).all(new Date().toISOString().slice(0, 7) + '%', scope, scope)
+  ).all(...(() => { const m = (ym || new Date().toISOString().slice(0, 7)) + '%';
+                    return [m, m, scope, scope]; })())
     .map((u) => ({ ...u, bound: !!u.device_id, has_key: !!u.has_key, timezone: tzOf(u.location) }));
 
 function audit(actor, action, detail, ip) {
