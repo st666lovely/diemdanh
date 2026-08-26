@@ -961,6 +961,11 @@ async function loadShiftLog() {
       ? `${x.in_progress ? '~' : ''}${Math.floor(x.duration_min / 60)}h${String(x.duration_min % 60).padStart(2, '0')}`
       : '<span class="sub">—</span>'}</td>
     <td class="c">${x.ot ? `<span class="pill amb">+${x.ot}h</span>` : '<span class="sub">—</span>'}</td>
+    <td class="c" style="white-space:nowrap">
+      ${x.in_photo_id ? `<button class="btn btn-sm" onclick="viewPhoto('punch',${x.in_photo_id})">Vào</button>` : ''}
+      ${x.out_photo_id ? `<button class="btn btn-sm" onclick="viewPhoto('punch',${x.out_photo_id})">Ra</button>` : ''}
+      ${!x.in_photo_id && !x.out_photo_id ? '<span class="sub">—</span>' : ''}
+    </td>
   </tr>`).join('');
 
   $('#psl').innerHTML = `
@@ -982,8 +987,8 @@ async function loadShiftLog() {
     <div class="tw"><table>
       <thead><tr><th class="wide">Nhân viên</th><th>Ngày</th><th class="c">Vào</th>
         <th class="c">Trễ vào</th><th class="c">Ra</th><th class="c">Trễ ra</th>
-        <th class="c">Thời lượng</th><th class="c">OT</th></tr></thead>
-      <tbody>${trs || '<tr><td colspan="8" class="empty">Chưa có ca nào trong kỳ này.</td></tr>'}</tbody>
+        <th class="c">Thời lượng</th><th class="c">OT</th><th class="c">Ảnh</th></tr></thead>
+      <tbody>${trs || '<tr><td colspan="9" class="empty">Chưa có ca nào trong kỳ này.</td></tr>'}</tbody>
     </table></div>
     <div class="sub" style="margin-top:var(--s3)">${d.rows.length} ca · mới nhất trước</div>`;
 }
