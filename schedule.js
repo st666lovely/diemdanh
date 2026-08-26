@@ -37,13 +37,28 @@ function headerDay(v, ym) {
     if (d >= 1 && d <= 31) return `${ym}-${String(d).padStart(2, '0')}`;
   }
 
-  // Ô ngày thật do Excel lưu dạng serial
-  if (typeof v === 'number' && v > 40000 && v < 60000) {
-    const dt = new Date(Date.UTC(1899, 11, 30) + v * 86400000);
-    return dt.toISOString().slice(0, 10);
+  // Ô ngày do Excel lưu dạng số
+  const num = typeof v === 'number' ? v : (/^\d+(\.\d+)?$/.test(s) ? Number(s) : NaN);
+  if (Number.isFinite(num) && num > 40000 && num < 60000) {
+    const dt = new Date(Date.UTC(1899, 11, 30) + Math.floor(num) * 86400000);
+    const y = dt.getUTCFullYear();
+    const mo = dt.getUTCMonth() + 1;
+    const d = dt.getUTCDate();
+    const thẳng = `${y}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+    if (thẳng.startsWith(ym)) return thẳng;
+
+    /* Excel định dạng ngày kiểu Mỹ đọc "01/09" thành 9 tháng 1 thay vì 1 tháng 9.
+       Hoán đổi ngày và tháng: nếu kết quả rơi đúng tháng đang nhập thì đó mới là ý người viết.
+       Chỉ chữa khi cách đọc thẳng nằm NGOÀI tháng, nên không phá file đúng định dạng. */
+    if (d >= 1 && d <= 12) {
+      const đảo = `${y}-${String(d).padStart(2, '0')}-${String(mo).padStart(2, '0')}`;
+      if (đảo.startsWith(ym)) return đảo;
+    }
+    return thẳng;
   }
   return null;
 }
+
 
 /* Ô giờ: "10:00", "2:00", "7h", số thập phân của Excel, hoặc "08:00-16:00" (kiểu cũ) */
 function parseCell(raw, hours) {
@@ -117,24 +132,16 @@ function dateHeaderOf(row, ym) {
   return null;
 }
 
-/* Trong dòng tiêu đề, tìm các cột định danh + metadata: Mã NV, Tên, Khu vực,
-   Bộ phận, Brand, Mã cá nhân, Tháng lương. Các cột này không bắt buộc phải có
-   đủ — thiếu cột nào thì bỏ qua cột đó, không báo lỗi. */
+/* Trong dòng tiêu đề, tìm cột Mã NV và cột Tên */
 function findIdCols(row, dateCols) {
   const first = dateCols[0].index;
-  let empCol = null, nameCol = null, locCol = null, depCol = null,
-      brandCol = null, keyCol = null, keyMonthCol = null;
+  let empCol = null, nameCol = null;
   for (let i = 0; i < first; i++) {
     const n = norm(row[i]);
     if (!empCol && (n.includes('manv') || n === 'ma' || n.includes('manhanvien'))) empCol = i;
     if (!nameCol && (n === 'ten' || n === 'hoten' || n.includes('tennhanvien'))) nameCol = i;
-    if (!locCol && (n === 'khuvuc' || n === 'location' || n === 'khu')) locCol = i;
-    if (!depCol && (n === 'bophan' || n === 'department' || n === 'dept')) depCol = i;
-    if (!brandCol && n === 'brand') brandCol = i;
-    if (!keyCol && (n === 'macanhan' || n === 'personalkey' || n === 'mabaomat')) keyCol = i;
-    if (!keyMonthCol && (n === 'thangluong' || n === 'keymonth' || n === 'thang')) keyMonthCol = i;
   }
-  return { empCol, nameCol, locCol, depCol, brandCol, keyCol, keyMonthCol, firstDateCol: first };
+  return { empCol, nameCol, firstDateCol: first };
 }
 
 /**
@@ -177,12 +184,10 @@ function parseScheduleFile(buffer, ym, hoursOf = () => 8) {
 
       // Tiêu đề cột tên hay ghi tên bộ phận ("CS", "Risk") thay vì chữ "Tên",
       // nên nếu chưa xác định được thì lấy ô chữ đầu tiên trước vùng ngày,
-      // bỏ qua số thứ tự và bỏ qua các cột định danh/metadata đã nhận diện.
+      // bỏ qua số thứ tự và bỏ qua chính ô mã NV.
       if (!name) {
-        const skip = new Set([idCols.empCol, idCols.locCol, idCols.depCol,
-          idCols.brandCol, idCols.keyCol, idCols.keyMonthCol]);
         for (let i = 0; i < idCols.firstDateCol; i++) {
-          if (skip.has(i)) continue;
+          if (i === idCols.empCol) continue;
           const v = String(row[i] ?? '').trim();
           if (v && !/^\d+([.,]\d+)?$/.test(v)) { name = v; break; }
         }
@@ -199,14 +204,6 @@ function parseScheduleFile(buffer, ym, hoursOf = () => 8) {
       }
       const rec = byPerson.get(key);
       if (!rec.name && name) rec.name = name;
-
-      // Metadata đi kèm (nếu file có cột tương ứng) — ghi đè mỗi lần gặp dòng
-      // của người đó, để lấy giá trị mới nhất nếu người đó xuất hiện nhiều khối.
-      if (idCols.locCol !== null)      { const v = String(row[idCols.locCol] ?? '').trim();      if (v) rec.location = v; }
-      if (idCols.depCol !== null)      { const v = String(row[idCols.depCol] ?? '').trim();      if (v) rec.department = v; }
-      if (idCols.brandCol !== null)    { const v = String(row[idCols.brandCol] ?? '').trim();    if (v) rec.brand = v; }
-      if (idCols.keyCol !== null)      { const v = String(row[idCols.keyCol] ?? '').trim();      if (v) rec.personal_key = v; }
-      if (idCols.keyMonthCol !== null) { const v = String(row[idCols.keyMonthCol] ?? '').trim(); if (v) rec.key_month = v; }
 
       const hours = hoursOf(emp, name) || 8;
 
