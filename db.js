@@ -204,6 +204,11 @@ CREATE TABLE IF NOT EXISTS report_exempt (
   const pc = db.prepare('PRAGMA table_info(punches)').all().map((c) => c.name);
   if (!pc.includes('photo_path')) db.exec('ALTER TABLE punches ADD COLUMN photo_path TEXT');
   if (!rc.includes('photo_path')) db.exec('ALTER TABLE roll_calls ADD COLUMN photo_path TEXT');
+  // Ảnh chụp màn hình Trạm trực trên máy tính — chứng minh đang ngồi tại máy làm việc
+  if (!pc.includes('screen_path')) db.exec('ALTER TABLE punches ADD COLUMN screen_path TEXT');
+  const ac = db.prepare('PRAGMA table_info(activities)').all().map((c) => c.name);
+  if (!ac.includes('screen_path')) db.exec('ALTER TABLE activities ADD COLUMN screen_path TEXT');
+  if (!rc.includes('screen_path')) db.exec('ALTER TABLE roll_calls ADD COLUMN screen_path TEXT');
 }
 
 /* ============================================================
@@ -294,6 +299,7 @@ function present(a) {
     brand: a.brand, department: a.department,
     started_at: a.started_at, limit_minutes: a.limit_minutes,
     remaining_seconds: left, over_limit: left < 0,
+    screen_id: a.screen_path ? a.id : null,
   };
 }
 
@@ -344,7 +350,7 @@ function startActivity(user, code, ip, ua) {
   }
 }
 
-function stopActivity(user, closedBy = 'staff', id = null) {
+function stopActivity(user, closedBy = 'staff', id = null, screenPath = null) {
   const a = id
     ? db.prepare('SELECT * FROM activities WHERE id=? AND ended_at IS NULL').get(id)
     : openFor(user.id);
@@ -354,8 +360,9 @@ function stopActivity(user, closedBy = 'staff', id = null) {
   const sec = Math.round((end - a.started_at) / 1000);
   const over = sec > a.limit_minutes * 60;
 
-  db.prepare(`UPDATE activities SET ended_at=?,duration_sec=?,is_over_limit=?,closed_by=?,lock_key=NULL
-              WHERE id=?`).run(end, sec, over ? 1 : 0, closedBy, a.id);
+  db.prepare(`UPDATE activities SET ended_at=?,duration_sec=?,is_over_limit=?,closed_by=?,
+              lock_key=NULL, screen_path=COALESCE(?, screen_path) WHERE id=?`)
+    .run(end, sec, over ? 1 : 0, closedBy, screenPath, a.id);
 
   return {
     ok: true, over_limit: over,
@@ -588,7 +595,7 @@ function lateOf(kind, diffMin) {
   return null;
 }
 
-function punch(user, kind, ip, ua, photoPath) {
+function punch(user, kind, ip, ua, photoPath, screenPath) {
   if (!PUNCH_ACTIVE.includes(kind)) return { ok: false, message: 'Loại chấm công không hợp lệ.' };
 
   const st = shiftToday(user);
@@ -623,10 +630,11 @@ function punch(user, kind, ip, ua, photoPath) {
   const hhmm = new Date(at).toLocaleTimeString('vi-VN', { hour12: false, timeZone: tz });
 
   db.prepare(`INSERT INTO punches
-    (user_id,kind,brand,department,scheduled_at,actual_at,late_minutes,late_level,ip,user_agent,photo_path)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(
+    (user_id,kind,brand,department,scheduled_at,actual_at,late_minutes,late_level,ip,user_agent,photo_path,screen_path)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`).run(
     user.id, kind, user.brand, user.department, sched, at,
-    Math.max(0, diff), level, ip, (ua || '').slice(0, 400), photoPath || null);
+    Math.max(0, diff), level, ip, (ua || '').slice(0, 400),
+    photoPath || null, screenPath || null);
 
   const gioLich = sched
     ? new Date(sched).toLocaleTimeString('vi-VN', { hour12: false, timeZone: tz }).slice(0, 5)
@@ -731,6 +739,7 @@ function punchHistory(f = {}, viewer = null) {
       late_minutes: r.late_minutes, late_level: r.late_level,
       late_label: r.late_level ? LATE_LEVELS[r.late_level].label : null, ip: r.ip,
       photo_id: r.photo_path ? r.id : null,
+      screen_id: r.screen_path ? r.id : null,
     })),
     stats: {
       total: s.total || 0, in5: s.a || 0, in30: s.b || 0, out60: s.c || 0,
@@ -769,7 +778,7 @@ function shiftLog(f = {}, scope = null) {
         department: r.department, brand: r.brand, day,
         in_at: null, out_at: null, in_late: null, in_late_min: 0,
         out_late: null, out_late_min: 0, in_sched: null, out_sched: null,
-        in_photo_id: null, out_photo_id: null,
+        in_photo_id: null, out_photo_id: null, in_screen_id: null, out_screen_id: null,
       });
     }
     const o = byKey.get(k);
@@ -777,11 +786,13 @@ function shiftLog(f = {}, scope = null) {
       o.in_at = r.actual_at; o.in_sched = r.scheduled_at;
       o.in_late = r.late_level; o.in_late_min = r.late_minutes;
       o.in_photo_id = r.photo_path ? r.id : null;
+      o.in_screen_id = r.screen_path ? r.id : null;
     }
     if (r.kind === 'out' && (!o.out_at || r.actual_at > o.out_at)) {
       o.out_at = r.actual_at; o.out_sched = r.scheduled_at;
       o.out_late = r.late_level; o.out_late_min = r.late_minutes;
       o.out_photo_id = r.photo_path ? r.id : null;
+      o.out_screen_id = r.screen_path ? r.id : null;
     }
   }
 
@@ -848,9 +859,10 @@ function rollCallByDay(userId, f = {}) {
      GROUP BY r.day ORDER BY r.day DESC LIMIT 60`).all(...p);
 
   const chiTiet = db.prepare(
-    `SELECT id, day, due_at, deadline_at, answered_at, status, is_makeup, defer_reason, photo_path
+    `SELECT id, day, due_at, deadline_at, answered_at, status, is_makeup, defer_reason, photo_path, screen_path
      FROM roll_calls WHERE ${w.join(' AND ')} ORDER BY day DESC, due_at DESC LIMIT 300`).all(...p)
-    .map((r) => ({ ...r, photo_id: r.photo_path ? r.id : null, photo_path: undefined }));
+    .map((r) => ({ ...r, photo_id: r.photo_path ? r.id : null,
+      screen_id: r.screen_path ? r.id : null, photo_path: undefined, screen_path: undefined }));
 
   return { byDay: rows, items: chiTiet };
 }
@@ -1423,15 +1435,15 @@ function activeRollCall(userId) {
   return rc;
 }
 
-function answerRollCall(user, key, ip, photoPath) {
+function answerRollCall(user, key, ip, photoPath, screenPath) {
   const rc = activeRollCall(user.id);
   if (!rc) return { ok: false, message: "Không có lượt điểm danh nào đang chờ." };
 
   const chk = checkPersonalKey(user, key);
   if (!chk.ok) return chk;
 
-  db.prepare("UPDATE roll_calls SET status='done', answered_at=?, ip=?, photo_path=? WHERE id=?")
-    .run(now(), ip, photoPath || null, rc.id);
+  db.prepare("UPDATE roll_calls SET status='done', answered_at=?, ip=?, photo_path=?, screen_path=? WHERE id=?")
+    .run(now(), ip, photoPath || null, screenPath || null, rc.id);
   return {
     ok: true,
     message: rc.is_makeup ? "Đã điểm danh bù xong." : "Đã điểm danh.",
