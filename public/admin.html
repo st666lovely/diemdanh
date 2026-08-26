@@ -133,7 +133,7 @@ function q() {
 }
 
 async function load() {
-  const r = await fetch('/api/admin/board?' + q());
+  const r = await fetch('/api/admin/board?' + q() + (uQ && uQ.ym ? '&ym=' + uQ.ym : ''));
   if (r.status === 401 || r.status === 403) { $('#gate').hidden = false; $('#app').hidden = true; return; }
   B = await r.json();
   skew = B.server_time - Date.now();
@@ -226,8 +226,29 @@ async function closeAct(id) {
 /* ---------- Nhân sự ---------- */
 function linkOf(k) { return location.origin + '/k/' + k; }
 
+/* Bộ lọc bảng nhân sự — giữ trong biến để vẽ lại không mất lựa chọn */
+let uQ = { q: '', department: '', location: '', brand: '', ym: '' };
+
+function uSet() {
+  ['q', 'department', 'location', 'brand'].forEach(k => {
+    const el = document.querySelector(`[data-u="${k}"]`);
+    if (el) uQ[k] = el.value;
+  });
+  renderUsers();
+}
+function uSetMonth(v) { uQ.ym = v; load(); }     // đổi tháng phải hỏi lại máy chủ
+function uClear() { uQ = { q: '', department: '', location: '', brand: '', ym: uQ.ym }; renderUsers(); }
+
 function renderUsers() {
-  const staff = B.users.filter(u => u.role === 'staff');
+  const tất = B.users.filter(u => u.role === 'staff');
+  const tìm = uQ.q.trim().toLowerCase();
+  const staff = tất.filter(u =>
+    (!tìm || (u.name || '').toLowerCase().includes(tìm)
+          || (u.emp_code || '').toLowerCase().includes(tìm)
+          || (u.key || '').toLowerCase().includes(tìm))
+    && (!uQ.department || u.department === uQ.department)
+    && (!uQ.location || u.location === uQ.location)
+    && (!uQ.brand || u.brand === uQ.brand));
   const trs = staff.map(u => `<tr>
     <td class="wide"><div style="font-weight:600">${esc(u.name)}</div>
       <div style="margin-top:5px;display:inline-flex;gap:5px">
@@ -249,8 +270,10 @@ function renderUsers() {
       </select>
       <div class="sub" style="margin-top:4px">${u.timezone || ''}</div></td>
     <td>${u.work_days
-      ? `<span class="pill pri">${u.work_days} ngày</span>`
-      : '<span class="pill red">chưa có lịch</span>'}</td>
+      ? `<span class="pill pri">${u.work_days} ngày làm</span>`
+        + (u.off_days ? `<div class="sub" style="margin-top:4px">${u.off_days} ngày xin nghỉ</div>` : '')
+      : '<span class="pill red">chưa có lịch</span>'
+        + (u.off_days ? `<div class="sub" style="margin-top:4px">${u.off_days} ngày xin nghỉ</div>` : '')}</td>
     <td>${u.has_key
       ? `<span class="pill pri"><span class="dot"></span>Đã đặt</span>
          <div class="sub" style="margin-top:4px">lương ${u.key_month || '—'}</div>`
@@ -293,6 +316,8 @@ function renderUsers() {
         <span class="mono">Ten</span>. Các cột <span class="mono">KhuVuc</span>,
         <span class="mono">BoPhan</span>, <span class="mono">Brand</span>,
         <span class="mono">MaCaNhan</span>, <span class="mono">ThangLuong</span> là tuỳ chọn.
+        Excel hay tự đổi tiêu đề <span class="mono">01/09</span>…<span class="mono">12/09</span>
+        thành ngày kiểu Mỹ (9 tháng 1) — hệ thống tự nhận ra và sửa lại đúng.
         <b>Định dạng cột MaCaNhan thành Text</b>, nếu không Excel cắt mất số 0 đầu.<br>
         <b>Người chưa có trong hệ thống sẽ được tự tạo mới</b> theo tên trong file — không cần
         thêm tay trước. Nếu file thiếu cột Bộ phận/Brand cho người mới, vào bảng bên dưới
@@ -313,15 +338,39 @@ function renderUsers() {
       </div>
     </div>
 
+    <div class="sec"><span class="t">Danh sách nhân sự</span><span class="rule"></span>
+      <span class="r">${staff.length}/${tất.length} người</span></div>
+
+    <div class="fil">
+      <div class="f" style="min-width:210px"><label>Tìm tên / mã NV / link</label>
+        <input data-u="q" value="${esc(uQ.q)}" placeholder="gõ để lọc…" oninput="uSet()"></div>
+      <div class="f"><label>Bộ phận</label>
+        <select data-u="department" onchange="uSet()"><option value="">Tất cả</option>
+          ${B.departments.map(x => `<option ${uQ.department === x ? 'selected' : ''}>${x}</option>`).join('')}
+        </select></div>
+      <div class="f"><label>Khu vực</label>
+        <select data-u="location" onchange="uSet()"><option value="">Tất cả</option>
+          ${['VN', 'ARM'].map(x => `<option ${uQ.location === x ? 'selected' : ''}>${x}</option>`).join('')}
+        </select></div>
+      ${B.brands.length > 1 ? `<div class="f"><label>Brand</label>
+        <select data-u="brand" onchange="uSet()"><option value="">Tất cả</option>
+          ${B.brands.map(x => `<option ${uQ.brand === x ? 'selected' : ''}>${x}</option>`).join('')}
+        </select></div>` : ''}
+      <div class="f" style="max-width:170px"><label>Xem lịch tháng</label>
+        <input type="month" value="${B.staff_ym || ''}" onchange="uSetMonth(this.value)"></div>
+      <button class="btn btn-sm" onclick="uClear()">Xóa lọc</button>
+    </div>
+
     <div class="tw"><table>
       <thead><tr><th class="wide">Nhân viên</th><th>Mã NV</th><th>Link vào ca</th>
         <th>Độ dài ca</th><th>Khu vực</th>
-        <th>Lịch tháng này</th><th>Mã cá nhân</th>
+        <th>Lịch tháng ${(B.staff_ym || '').split('-')[1] || ''}</th><th>Mã cá nhân</th>
         <th class="r">Xử lý</th></tr></thead>
-      <tbody>${trs || '<tr><td colspan="7" class="empty">Chưa có nhân viên nào.</td></tr>'}</tbody>
+      <tbody>${trs || `<tr><td colspan="8" class="empty">${tất.length
+        ? 'Không có ai khớp bộ lọc.' : 'Chưa có nhân viên nào.'}</td></tr>`}</tbody>
     </table></div>
-    <div class="sub" style="margin-top:10px">${staff.length} nhân viên · gửi link cho từng người một lần,
-      họ lưu vào màn hình chính là xong</div>`;
+    <div class="sub" style="margin-top:10px">Cột lịch đang xem tháng
+      <b>${B.staff_ym || ''}</b> · đổi tháng ở ô "Xem lịch tháng" bên trên</div>`;
 }
 
 async function setHours(id, hours) {
