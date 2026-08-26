@@ -296,7 +296,10 @@ const Cam = {
     }
   },
 
-  async open(title) {
+  /* mode: 'full' = webcam + màn hình (lên ca, xuống ca, điểm danh)
+            'screen' = chỉ màn hình (dừng hoạt động) */
+  async open(title, mode = 'full') {
+    this.mode = mode;
     const modal = $('#camModal');
     $('#camTitle').textContent = title;
     $('#camShot').hidden = true; $('#camVideo').hidden = false;
@@ -304,10 +307,22 @@ const Cam = {
     $('#camErr').hidden = true; $('#camKey').value = '';
     this.screen = null;
     $('#camFlip').hidden = !this.isMobile();          // máy tính không có camera thứ hai
-    $('#camScreenRow').hidden = !this.canCaptureScreen();
+    $('#camScreenRow').hidden = false;                // luôn cần ảnh màn hình
     $('#camScreenState').textContent = 'Chưa chụp màn hình';
     $('#camScreenRow').classList.remove('done');
     modal.hidden = false;
+
+    // Chế độ chỉ màn hình: bỏ hẳn phần webcam, vào thẳng bước xác nhận
+    if (mode === 'screen') {
+      $('#camVideo').hidden = true;
+      $('#camActionsShoot').hidden = true;
+      $('#camActionsConfirm').hidden = false;
+      $('#camShot').hidden = true;
+      this._lastShot = null;
+      setTimeout(() => $('#camScreenBtn').focus(), 50);
+      return;
+    }
+
     try {
       await this.startStream();
     } catch (e) {
@@ -378,9 +393,12 @@ $('#camRetake').onclick = () => Cam.retake();
 $('#camConfirm').onclick = () => {
   const key = $('#camKey').value.trim();
   if (S && S.key && S.key.required && !key) { $('#camKey').focus(); return; }
-  // Máy tính thì bắt buộc có ảnh màn hình
-  if (Cam.canCaptureScreen() && !Cam.screen) {
+  if (!Cam.screen) {
     toast('Thiếu ảnh màn hình', 'Bấm "Chụp màn hình" và chọn cửa sổ Trạm trực.', false);
+    return;
+  }
+  if (Cam.mode !== 'screen' && !Cam._lastShot) {
+    toast('Thiếu ảnh chụp', 'Bấm nút Chụp trước đã.', false);
     return;
   }
   const photo = Cam._lastShot, screen = Cam.screen;
@@ -390,10 +408,10 @@ $('#camConfirm').onclick = () => {
 $('#camKey').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('#camConfirm').click(); });
 
 /* confirmWithPhoto(title) -> Promise<{key, photo, screen} | null> */
-function confirmWithPhoto(title) {
+function confirmWithPhoto(title, mode) {
   return new Promise((resolve) => {
     Cam._resolve = resolve;
-    Cam.open(title);
+    Cam.open(title, mode || 'full');
   });
 }
 
@@ -428,12 +446,24 @@ async function load() {
 
 async function act(url, body) {
   if (busy) return;
-  const việc = url.includes('/stop') ? 'dừng hoạt động' : 'bắt đầu hoạt động';
-  const k = askKey(việc);
-  if (k === null) return;
+  const dừng = url.includes('/stop');
+
+  let k = '', screen = null;
+  if (dừng) {
+    // Dừng hoạt động: chụp màn hình để chứng minh đã quay lại máy
+    const c = await confirmWithPhoto('Chụp màn hình để dừng hoạt động', 'screen');
+    if (!c) return;
+    k = c.key; screen = c.screen;
+  } else {
+    const kk = askKey('bắt đầu hoạt động');
+    if (kk === null) return;
+    k = kk;
+  }
+
   busy = true;
-  const r = await api(url, { ...(body || {}), key: k });
+  const r = await api(url, { ...(body || {}), key: k, screen });
   busy = false;
+  if (r.screen_required) { toast('Cần ảnh màn hình', r.message, false); return; }
   if (r.ok && url.includes('/stop')) Alarm.stop();
   if (r.state) { S = r.state; skew = S.server_time - Date.now(); }
   toast(r.ok ? 'Đã ghi nhận' : 'Chưa thực hiện được', r.message || '', !!r.ok);
