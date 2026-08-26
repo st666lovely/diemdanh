@@ -169,6 +169,9 @@ function renderBoard() {
       : `<span style="font-weight:600">${Math.floor(r.duration_sec/60)}p${pad(r.duration_sec%60)}s</span>
          <div style="margin-top:4px"><span class="pill ${r.is_over_limit ? 'red' : 'pri'}">${r.is_over_limit ? 'Quá giờ' : 'Trong giờ'}</span></div>`}</td>
     <td>${cb[r.closed_by] || '<span class="sub">—</span>'}</td>
+    <td class="c">${r.screen_id
+      ? `<button class="btn btn-sm" onclick="viewPhoto('activity',${r.screen_id},'screen')">Màn hình</button>`
+      : '<span class="sub">—</span>'}</td>
     <td class="sub">${r.ip || '—'}</td>
     <td class="r">${r.ended_at ? '<span class="sub">—</span>'
       : `<button class="btn btn-red btn-sm" onclick="closeAct(${r.id})">Đóng hộ</button>`}</td></tr>`).join('');
@@ -205,7 +208,7 @@ function renderBoard() {
 
     <div class="tw"><table>
       <thead><tr><th class="wide">Nhân viên</th><th>Hoạt động</th><th>Bắt đầu</th><th>Kết thúc</th>
-      <th>Thời lượng</th><th>Kết thúc bởi</th><th>IP</th><th class="r">Xử lý</th></tr></thead>
+      <th>Thời lượng</th><th>Kết thúc bởi</th><th class="c">Ảnh</th><th>IP</th><th class="r">Xử lý</th></tr></thead>
       <tbody>${trs || '<tr><td colspan="8" class="empty">Chưa có hoạt động nào khớp bộ lọc.</td></tr>'}</tbody>
     </table></div>
     <div class="sub" style="margin-top:10px">${B.rows.length} bản ghi hiển thị</div>`;
@@ -581,17 +584,40 @@ async function rcDetail(userId, name) {
 }
 
 /* Mở ảnh xác nhận (selfie) trong lightbox nhỏ. table: 'punch' | 'rollcall' */
-function viewPhoto(table, id) {
+function viewPhoto(table, id, only) {
   const modal = document.createElement('div');
   modal.className = 'cam-modal';
-  modal.innerHTML = `<div class="cam-box" style="max-width:420px">
-    <div class="cam-h"><span>Ảnh xác nhận có mặt</span><button class="x" id="phClose">×</button></div>
-    <div class="cam-view" style="aspect-ratio:1/1">
-      <img src="/api/admin/photo/${table}/${id}" style="width:100%;height:100%;object-fit:cover"
+  modal.innerHTML = `<div class="cam-box" style="max-width:min(820px,94vw)">
+    <div class="cam-h"><span>Ảnh xác nhận có mặt</span>
+      ${only === 'screen' ? '' : `<div class="tabs" style="margin:0 auto 0 var(--s4);padding:2px">
+        <button class="on" data-ph="photo">Ảnh chụp</button>
+        <button data-ph="screen">Màn hình</button>
+      </div>`}
+      <button class="x" id="phClose">×</button></div>
+    <div class="cam-view" id="phView" style="aspect-ratio:${only === 'screen' ? '16/10' : '1/1'}">
+      <img src="/api/admin/photo/${table}/${id}${only === 'screen' ? '?kind=screen' : ''}" style="width:100%;height:100%;object-fit:contain;background:#0C1613"
         onerror="this.parentElement.innerHTML='<div class=&quot;cam-err&quot;>Không tải được ảnh — có thể đã bị xoá.</div>'">
     </div>
   </div>`;
   document.body.appendChild(modal);
+
+  // Chuyển giữa ảnh chụp và ảnh màn hình
+  modal.querySelectorAll('[data-ph]').forEach((b) => {
+    b.onclick = () => {
+      modal.querySelectorAll('[data-ph]').forEach((x) => x.classList.toggle('on', x === b));
+      const kind = b.dataset.ph;
+      const view = modal.querySelector('#phView');
+      view.style.aspectRatio = kind === 'screen' ? '16/10' : '1/1';
+      view.innerHTML = `<img src="/api/admin/photo/${table}/${id}${kind === 'screen' ? '?kind=screen' : ''}"
+        style="width:100%;height:100%;object-fit:contain;background:#0C1613"
+        onerror="this.parentElement.innerHTML='<div class=&quot;cam-err&quot;>`
+        + (kind === 'screen'
+            ? 'Lượt này không có ảnh màn hình — nhân viên bấm từ điện thoại.'
+            : 'Không tải được ảnh.')
+        + `</div>'">`;
+    };
+  });
+
   modal.querySelector('#phClose').onclick = () => modal.remove();
   modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
 }
