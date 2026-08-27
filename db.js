@@ -158,6 +158,13 @@ CREATE TABLE IF NOT EXISTS ot_records (
   PRIMARY KEY (user_id, day)
 );
 
+-- Cấu hình đổi được tại chỗ, không phải deploy lại
+CREATE TABLE IF NOT EXISTS settings (
+  k TEXT PRIMARY KEY,
+  v TEXT,
+  at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS report_exempt (
   user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   day        TEXT    NOT NULL,
@@ -1678,8 +1685,36 @@ function otToday(user) {
    NỢ BÁO CÁO
    Có ca trong lịch mà không có dòng nào trong sheet = nợ.
    ============================================================ */
-const REPORT_DEPTS = (process.env.REPORT_DEPTS || 'CS,CS ONL,VIP,RISK,RISK ONL')
+/* Bộ phận nào phải nộp báo cáo. Lấy từ bảng settings để quản trị bật/tắt
+   ngay trên giao diện; chưa đặt bao giờ thì lấy giá trị trong biến môi trường. */
+const REPORT_DEPTS_DEFAULT = (process.env.REPORT_DEPTS || 'RISK')
   .split(',').map((x) => x.trim().toUpperCase()).filter(Boolean);
+
+const getSetting = (k) => {
+  const r = db.prepare('SELECT v FROM settings WHERE k=?').get(k);
+  return r ? r.v : null;
+};
+const setSetting = (k, v) =>
+  db.prepare('INSERT OR REPLACE INTO settings (k,v,at) VALUES (?,?,?)').run(k, v, now());
+
+function reportDepts() {
+  const v = getSetting('report_depts');
+  if (v === null) return REPORT_DEPTS_DEFAULT;
+  return v.split(',').map((x) => x.trim().toUpperCase()).filter(Boolean);
+}
+
+function setReportDepts(list) {
+  const clean = (Array.isArray(list) ? list : [])
+    .map((x) => String(x).trim().toUpperCase())
+    .filter((x) => DEPTS.includes(x));
+  setSetting('report_depts', clean.join(','));
+  return {
+    ok: true, depts: clean,
+    message: clean.length
+      ? `Áp dụng theo dõi báo cáo cho: ${clean.join(', ')}.`
+      : 'Đã tắt theo dõi báo cáo cho tất cả bộ phận.',
+  };
+}
 const REPORT_GRACE_MIN   = Math.max(0, Number(process.env.REPORT_GRACE_MIN) || 60);
 const REPORT_BLOCK_AFTER = Math.max(1, Number(process.env.REPORT_BLOCK_AFTER) || 1);
 const REPORT_ALERT_AFTER = Math.max(1, Number(process.env.REPORT_ALERT_AFTER) || 3);
@@ -1759,7 +1794,8 @@ module.exports = {
   hasCheckedOut, cancelPendingRollCalls, hasShiftOn,
   setShiftHours, setShiftHoursBulk, setOT, clearOT, otToday, otOf,
   monthHasSchedule, isOffDay,
-  REPORT_DEPTS, REPORT_GRACE_MIN, REPORT_BLOCK_AFTER, REPORT_ALERT_AFTER,
+  reportDepts, setReportDepts, getSetting, setSetting,
+  REPORT_GRACE_MIN, REPORT_BLOCK_AFTER, REPORT_ALERT_AFTER,
   sweepRollCalls, releaseMakeups, activeRollCall, answerRollCall, rollCallReport, upcomingRollCalls, fireRollCall, deferRollCall,
   rollCallByDay, activityByDay, shiftLog,
   RC_PER_SHIFT, RC_WINDOW_MIN, RC_MAKEUP_MIN,
