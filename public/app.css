@@ -569,3 +569,36 @@ body.alarming::after{
   font-size:16px;background:var(--card-2);
 }
 .cam-key:focus{outline:none;border-color:var(--pri);box-shadow:0 0 0 3px var(--pri-s);background:var(--card)}
+
+/* ===== Khối chụp màn hình trong khung chụp ảnh ===== */
+.cam-screen{
+  display:flex;align-items:center;gap:var(--s3);padding:var(--s3);
+  border:1.5px dashed var(--line-2);border-radius:var(--r);margin-bottom:var(--s2);
+}
+.cam-screen .m{flex:1;min-width:0}
+.cam-screen .m .a{font-weight:700;font-size:13.5px}
+.cam-screen .m .b{font-size:12px;color:var(--tx-3);margin-top:2px;line-height:1.45}
+.cam-screen .btn{flex:none}
+.cam-screen.done{border-style:solid;border-color:var(--pri-l);background:var(--pri-s)}
+.cam-screen.done .m .a{color:var(--pri)}
+
+/* ===== Nhóm ô tích chọn bộ phận ===== */
+.checks{display:flex;flex-wrap:wrap;gap:var(--s2)}
+.check{
+  display:inline-flex;align-items:center;gap:9px;cursor:pointer;user-select:none;
+  padding:9px 15px 9px 11px;border-radius:var(--r-sm);
+  border:1.5px solid var(--line-2);background:#fff;
+  font-size:14px;font-weight:600;color:var(--tx-2);
+  transition:background .15s,border-color .15s,color .15s;
+}
+.check:hover{background:var(--card-2);border-color:var(--tx-3)}
+.check input{position:absolute;opacity:0;width:0;height:0}
+.check .box{
+  width:19px;height:19px;border-radius:5px;flex:none;
+  border:1.5px solid var(--line-2);background:#fff;
+  display:flex;align-items:center;justify-content:center;
+  font-size:12px;font-weight:800;color:#fff;line-height:1;
+}
+.check.on{background:var(--pri-s);border-color:var(--pri);color:var(--pri)}
+.check.on .box{background:var(--pri);border-color:var(--pri)}
+.check input:focus-visible + .box{outline:2px solid var(--pri);outline-offset:2px}
