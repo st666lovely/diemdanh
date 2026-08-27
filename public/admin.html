@@ -802,9 +802,15 @@ async function loadReports(refresh) {
     <div class="card card-p" style="margin-bottom:var(--s4)">
       <div style="font-size:11.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--tx-3);margin-bottom:var(--s3)">
         Áp dụng theo dõi báo cáo cho bộ phận</div>
-      <div class="chips">
-        ${d.departments.map(x => `<button class="chip ${d.config.depts.includes(x) ? 'on' : ''}"
-          onclick="toggleReportDept('${x}')">${x}</button>`).join('')}
+      <div class="checks">
+        ${d.departments.map(x => {
+          const on = d.config.depts.includes(x);
+          return `<label class="check ${on ? 'on' : ''}">
+            <input type="checkbox" ${on ? 'checked' : ''} onchange="toggleReportDept('${x}')">
+            <span class="box">${on ? '✓' : ''}</span>
+            <span class="lb">${x}</span>
+          </label>`;
+        }).join('')}
       </div>
       <div class="sub" style="margin-top:var(--s3);line-height:1.6">
         Bộ phận không bật thì <b>không bị tính nợ và không bị chặn ca</b>.
