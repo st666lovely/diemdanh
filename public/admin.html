@@ -725,10 +725,25 @@ function upcomingBox(d) {
 
 /* ---------- Tuân thủ báo cáo ---------- */
 let repDays = 14, repCfg = { depts: [] };
+let repQ = { q: '', user_id: '', department: '', brand: '', location: '' };
+
+function repSet() {
+  ['q', 'user_id', 'department', 'brand', 'location'].forEach(k => {
+    const el = document.querySelector(`[data-rp="${k}"]`);
+    if (el) repQ[k] = el.value;
+  });
+  loadReports();
+}
+function repClear() {
+  repQ = { q: '', user_id: '', department: '', brand: '', location: '' };
+  loadReports();
+}
 
 async function loadReports(refresh) {
   $('#prp').innerHTML = '<div class="empty">Đang đọc Google Sheets…</div>';
-  const r = await fetch(`/api/admin/reports?days=${repDays}${refresh ? '&refresh=1' : ''}`);
+  const qs = new URLSearchParams({ days: repDays, ...repQ });
+  if (refresh) qs.set('refresh', '1');
+  const r = await fetch('/api/admin/reports?' + qs);
   if (r.status !== 200) { $('#prp').innerHTML = '<div class="empty">Không xem được mục này.</div>'; return; }
   const d = await r.json();
   repCfg = d.config || { depts: [] };
@@ -825,10 +840,29 @@ async function loadReports(refresh) {
       <div class="kpi red"><div class="n">${d.stats.alert}</div><div class="l">Chạm ngưỡng khóa BO</div></div>
     </div>
     <div class="fil">
+      <div class="f" style="min-width:200px"><label>Tìm tên / mã NV</label>
+        <input data-rp="q" value="${esc(repQ.q)}" placeholder="gõ để lọc…" oninput="repSet()"></div>
+      <div class="f"><label>Nhân viên</label>
+        <select data-rp="user_id" onchange="repSet()"><option value="">Tất cả</option>
+          ${(d.users || []).map(u => `<option value="${u.id}" ${repQ.user_id == u.id ? 'selected' : ''}>${esc(u.name)}</option>`).join('')}
+        </select></div>
+      <div class="f"><label>Bộ phận</label>
+        <select data-rp="department" onchange="repSet()"><option value="">Tất cả</option>
+          ${(d.config.depts || []).map(x => `<option ${repQ.department === x ? 'selected' : ''}>${x}</option>`).join('')}
+        </select></div>
+      <div class="f"><label>Khu vực</label>
+        <select data-rp="location" onchange="repSet()"><option value="">Tất cả</option>
+          ${(d.locations || ['VN', 'ARM']).map(x => `<option ${repQ.location === x ? 'selected' : ''}>${x}</option>`).join('')}
+        </select></div>
+      ${d.brands.length > 1 ? `<div class="f"><label>Brand</label>
+        <select data-rp="brand" onchange="repSet()"><option value="">Tất cả</option>
+          ${d.brands.map(x => `<option ${repQ.brand === x ? 'selected' : ''}>${x}</option>`).join('')}
+        </select></div>` : ''}
       <div class="f"><label>Số ngày nhìn lại</label>
         <select onchange="repDays=+this.value;loadReports()">
           ${[7, 14, 21, 31].map(n => `<option value="${n}" ${repDays === n ? 'selected' : ''}>${n} ngày</option>`).join('')}
         </select></div>
+      <button class="btn btn-sm" onclick="repClear()">Xóa lọc</button>
       <button class="btn btn-sm" onclick="loadReports(true)">Đọc lại sheet ngay</button>
       <div class="legend">
         <span><i class="gcell ok"></i>đã điền</span>
