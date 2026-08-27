@@ -136,12 +136,22 @@ function dateHeaderOf(row, ym) {
 function findIdCols(row, dateCols) {
   const first = dateCols[0].index;
   let empCol = null, nameCol = null;
+  // Các cột phụ: bộ phận, brand, khu vực, mã cá nhân, tháng lương
+  let depCol = null, brandCol = null, locCol = null, keyCol = null, monthCol = null;
+
   for (let i = 0; i < first; i++) {
     const n = norm(row[i]);
     if (!empCol && (n.includes('manv') || n === 'ma' || n.includes('manhanvien'))) empCol = i;
     if (!nameCol && (n === 'ten' || n === 'hoten' || n.includes('tennhanvien'))) nameCol = i;
+    if (!depCol && (n.includes('bophan') || n.includes('phongban') || n === 'department')) depCol = i;
+    if (!brandCol && (n === 'brand' || n.includes('thuonghieu'))) brandCol = i;
+    if (!locCol && (n.includes('khuvuc') || n === 'location' || n.includes('quocgia')
+                    || n.includes('chinhanh'))) locCol = i;
+    if (!keyCol && (n.includes('macanhan') || n.includes('makhoa') || n === 'personalkey'
+                    || n === 'pin')) keyCol = i;
+    if (!monthCol && (n.includes('thangluong') || n.includes('kyluong'))) monthCol = i;
   }
-  return { empCol, nameCol, firstDateCol: first };
+  return { empCol, nameCol, depCol, brandCol, locCol, keyCol, monthCol, firstDateCol: first };
 }
 
 /**
@@ -186,8 +196,10 @@ function parseScheduleFile(buffer, ym, hoursOf = () => 8) {
       // nên nếu chưa xác định được thì lấy ô chữ đầu tiên trước vùng ngày,
       // bỏ qua số thứ tự và bỏ qua chính ô mã NV.
       if (!name) {
+        const bỏQua = new Set([idCols.empCol, idCols.depCol, idCols.brandCol,
+                               idCols.locCol, idCols.keyCol, idCols.monthCol]);
         for (let i = 0; i < idCols.firstDateCol; i++) {
-          if (i === idCols.empCol) continue;
+          if (bỏQua.has(i)) continue;
           const v = String(row[i] ?? '').trim();
           if (v && !/^\d+([.,]\d+)?$/.test(v)) { name = v; break; }
         }
@@ -204,6 +216,24 @@ function parseScheduleFile(buffer, ym, hoursOf = () => 8) {
       }
       const rec = byPerson.get(key);
       if (!rec.name && name) rec.name = name;
+
+      // Cột phụ: chỉ ghi đè khi ô có giá trị, để dòng sau trống không xoá dòng trước
+      const lấy = (col) => (col !== null && col !== undefined)
+        ? String(row[col] ?? '').trim() : '';
+      const dep = lấy(idCols.depCol);
+      const br = lấy(idCols.brandCol);
+      const loc = lấy(idCols.locCol);
+      const pk = lấy(idCols.keyCol);
+      const km = lấy(idCols.monthCol);
+      if (dep) rec.department = dep;
+      if (br) rec.brand = br;
+      if (loc) rec.location = loc;
+      if (km) rec.key_month = km;
+      if (pk) {
+        const raw = pk.replace(/\s+/g, '');
+        if (raw.length >= 4 && raw.length <= 32) rec.personal_key = raw;
+        else errors.push(`${name || emp}: mã cá nhân "${pk}" cần 4–32 ký tự, đã bỏ qua.`);
+      }
 
       const hours = hoursOf(emp, name) || 8;
 
