@@ -542,7 +542,7 @@ app.get('/api/admin/reports', requireUser, requireAdmin, async (req, res) => {
       grace_min: D.REPORT_GRACE_MIN,
       block_after: D.REPORT_BLOCK_AFTER,
       alert_after: D.REPORT_ALERT_AFTER,
-      depts: D.REPORT_DEPTS,
+      depts: D.reportDepts(),
     },
     stats: {
       total: rows.length,
@@ -554,6 +554,13 @@ app.get('/api/admin/reports', requireUser, requireAdmin, async (req, res) => {
     brands: req.scope ? [req.scope] : D.BRANDS,
     users: D.allUsers(req.scope).filter((u) => u.role === 'staff'),
   });
+});
+
+/* Bật / tắt theo dõi báo cáo theo bộ phận — đổi ngay, không cần deploy lại */
+app.post('/api/admin/report-depts', requireUser, requireAdmin, (req, res) => {
+  const r = D.setReportDepts((req.body || {}).depts);
+  D.audit(req.user, 'report_depts', r.depts.join(',') || '(tắt hết)', req.ip);
+  res.json(r);
 });
 
 app.put('/api/admin/users/:id/emp-code', requireUser, requireAdmin, (req, res) => {
@@ -621,7 +628,7 @@ app.delete('/api/admin/users/:id', requireUser, requireAdmin, (req, res) => {
 /* Tình trạng nợ của một nhân viên. force=true thì đọc lại sheet ngay. */
 async function reportStatus(user, force = false) {
   if (user.role !== 'staff') return { owing: [], today: null, blocked: false, off: true };
-  if (!D.REPORT_DEPTS.includes(String(user.department || '').toUpperCase())) {
+  if (!D.reportDepts().includes(String(user.department || '').toUpperCase())) {
     return { owing: [], today: null, blocked: false, off: true, reason: 'Bộ phận này không phải nộp' };
   }
 
