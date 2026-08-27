@@ -1105,15 +1105,20 @@ function applySchedule(parsed, mode = 'merge', scope = null) {
   const matched = [], created = [], skipped = [], outside = [], keySet = [];
 
   const byKey = db.prepare("SELECT * FROM users WHERE key=? AND role='staff'");
+  const byEmp = db.prepare("SELECT * FROM users WHERE emp_code=? AND role='staff'");
   const byName = db.prepare("SELECT * FROM users WHERE name=? AND role='staff'");
-  const insUser = db.prepare(`INSERT INTO users (name,key,department,brand,location,role,created_at)
-                               VALUES (?,?,?,?,?,'staff',?)`);
+  const insUser = db.prepare(`INSERT INTO users (name,key,emp_code,department,brand,location,role,created_at)
+                               VALUES (?,?,?,?,?,?,'staff',?)`);
 
   // Người có trong file nhưng chưa có tài khoản -> TỰ TẠO MỚI, không bắt phải
   // thêm tay trước rồi mới nhập lịch được. Bộ phận/Brand lấy từ file nếu có,
   // brand ép theo scope của admin đang nhập (an toàn hơn tin theo file).
   const resolveOne = (r) => {
-    let u = (r.key && byKey.get(r.key.toUpperCase())) || (r.name && byName.get(r.name)) || null;
+    // Cột "Ma" trong file thực tế là MÃ NHÂN VIÊN (ST666-770), không phải mã link.
+    // Thử cả ba cách khớp: mã link 8 ký tự, mã nhân viên, rồi tên.
+    const mã = (r.emp_code || r.key || '').trim().toUpperCase();
+    let u = (mã && byKey.get(mã)) || (mã && byEmp.get(mã))
+         || (r.name && byName.get(r.name)) || null;
     if (!u) {
       if (!r.name) { skipped.push(r.key || '(dòng không có tên)'); return null; }
 
@@ -1122,8 +1127,13 @@ function applySchedule(parsed, mode = 'merge', scope = null) {
       const br = scope !== null ? scope
         : (BRANDS.includes(String(r.brand).toUpperCase()) ? String(r.brand).toUpperCase() : null);
 
-      const info = insUser.run(r.name, newKey(), dep, br, loc, now());
-      u = { id: info.lastInsertRowid, name: r.name, brand: br, department: dep, location: loc };
+      // Mã NV lấy từ file nếu chưa ai dùng, không thì để trống rồi hệ thống tự sinh
+      let empCode = mã || null;
+      if (empCode && byEmp.get(empCode)) empCode = null;
+
+      const info = insUser.run(r.name, newKey(), empCode, dep, br, loc, now());
+      u = { id: info.lastInsertRowid, name: r.name, brand: br,
+            department: dep, location: loc, emp_code: empCode };
       created.push(r.name);
     }
     // Admin của brand này không được đụng vào người của brand kia
@@ -1163,6 +1173,13 @@ function applySchedule(parsed, mode = 'merge', scope = null) {
         ? String(rec.brand).toUpperCase() : user.brand;
       if (scope !== null) br = user.brand;   // admin theo brand không được chuyển người sang brand khác
       updMeta.run(loc, dep, br, user.id);
+
+      // Điền mã NV từ file nếu người đó chưa có và mã chưa ai dùng
+      const mãFile = (rec.emp_code || '').trim().toUpperCase();
+      if (mãFile && !user.emp_code) {
+        const trùng = db.prepare('SELECT 1 FROM users WHERE emp_code=? AND id<>?').get(mãFile, user.id);
+        if (!trùng) db.prepare('UPDATE users SET emp_code=? WHERE id=?').run(mãFile, user.id);
+      }
 
       // Mã cá nhân đi kèm trong file: băm rồi lưu, số gốc không giữ lại đâu cả
       if (rec.personal_key && KEY_RE.test(rec.personal_key)) {
