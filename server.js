@@ -485,7 +485,18 @@ app.post('/api/admin/rollcalls/fire', requireUser, requireAdmin, (req, res) => {
 app.get('/api/admin/reports', requireUser, requireAdmin, async (req, res) => {
   D.backfillEmpCodes();
   const back = Math.min(31, Math.max(3, Number(req.query.days) || 14));
-  const staff = D.allUsers(req.scope).filter((u) => u.role === 'staff' && u.is_active);
+  const f = req.query;
+  const tìm = String(f.q || '').trim().toLowerCase();
+  const staff = D.allUsers(req.scope).filter((u) =>
+    u.role === 'staff' && u.is_active
+    // Chỉ theo dõi bộ phận đang bật, đỡ hiện cả người không thuộc diện
+    && D.reportDepts().includes(String(u.department || '').toUpperCase())
+    && (!tìm || (u.name || '').toLowerCase().includes(tìm)
+             || (u.emp_code || '').toLowerCase().includes(tìm))
+    && (!f.department || u.department === f.department)
+    && (!f.brand || u.brand === f.brand)
+    && (!f.location || u.location === f.location)
+    && (!f.user_id || u.id === +f.user_id));
 
   const dayset = new Set();
   const perUser = [];
