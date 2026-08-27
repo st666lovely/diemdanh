@@ -724,13 +724,14 @@ function upcomingBox(d) {
 }
 
 /* ---------- Tuân thủ báo cáo ---------- */
-let repDays = 14;
+let repDays = 14, repCfg = { depts: [] };
 
 async function loadReports(refresh) {
   $('#prp').innerHTML = '<div class="empty">Đang đọc Google Sheets…</div>';
   const r = await fetch(`/api/admin/reports?days=${repDays}${refresh ? '&refresh=1' : ''}`);
   if (r.status !== 200) { $('#prp').innerHTML = '<div class="empty">Không xem được mục này.</div>'; return; }
   const d = await r.json();
+  repCfg = d.config || { depts: [] };
 
   const sh = d.sheet;
   const dsFile = (sh.sheets || []).map(x => `
@@ -798,6 +799,19 @@ async function loadReports(refresh) {
 
   $('#prp').innerHTML = `
     ${shBox}
+    <div class="card card-p" style="margin-bottom:var(--s4)">
+      <div style="font-size:11.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--tx-3);margin-bottom:var(--s3)">
+        Áp dụng theo dõi báo cáo cho bộ phận</div>
+      <div class="chips">
+        ${d.departments.map(x => `<button class="chip ${d.config.depts.includes(x) ? 'on' : ''}"
+          onclick="toggleReportDept('${x}')">${x}</button>`).join('')}
+      </div>
+      <div class="sub" style="margin-top:var(--s3);line-height:1.6">
+        Bộ phận không bật thì <b>không bị tính nợ và không bị chặn ca</b>.
+        Bật lại lúc nào cũng được, có hiệu lực ngay không cần deploy.
+      </div>
+    </div>
+
     <div class="kpis">
       <div class="kpi"><div class="n">${d.stats.total}</div><div class="l">Nhân viên</div></div>
       <div class="kpi amb"><div class="n">${d.stats.owing}</div><div class="l">Đang nợ</div></div>
@@ -823,6 +837,15 @@ async function loadReports(refresh) {
       <tbody>${trs || '<tr><td colspan="6" class="empty">Chưa có nhân viên nào có ca.</td></tr>'}</tbody>
     </table></div>
     <div class="sub" style="margin-top:10px">Xếp theo số ca nợ giảm dần</div>`;
+}
+
+async function toggleReportDept(dept) {
+  const cur = (repCfg.depts || []).slice();
+  const i = cur.indexOf(dept);
+  if (i >= 0) cur.splice(i, 1); else cur.push(dept);
+  const r = await api('/api/admin/report-depts', { method: 'POST', body: { depts: cur } });
+  toast(r.ok ? 'Đã cập nhật' : 'Không đổi được', r.message || '', !!r.ok);
+  loadReports(true);
 }
 
 async function exemptDay(userId, day, name) {
