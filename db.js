@@ -457,7 +457,7 @@ function history(f = {}, scope = null) {
     ...r, shift_day: shiftDayOf(r.user_id, r.started_at, tzOf(r.location || 'VN')),
   }));
   const trongKhoang = coNgay
-    .map((r) => ({ ...r, shift_code: caCuaNgay(r.user_id, r.shift_day, r.location) }))
+    .map((r) => ({ ...r, shift_code: caCuaNgay(r.user_id, r.shift_day) }))
     .filter((r) => (!f.from || r.shift_day >= f.from) && (!f.to || r.shift_day <= f.to)
                 && (!f.shift || r.shift_code === f.shift));
 
@@ -466,7 +466,8 @@ function history(f = {}, scope = null) {
       ...present(r), ended_at: r.ended_at, duration_sec: r.duration_sec,
       is_over_limit: !!r.is_over_limit, closed_by: r.closed_by, ip: r.ip,
       shift_day: r.shift_day, shift_code: r.shift_code,
-      shift_name: (shiftByCode(r.shift_code) || {}).name || null,
+      shift_name: r.shift_code
+        ? tenCa(r.shift_code.slice(0, 5), r.shift_code.slice(6), r.location) : null,
       // Bắt đầu một ngày, kết thúc sang ngày khác
       qua_dem: !!(r.ended_at
         && dayInTz(r.started_at, tzOf(r.location || 'VN'))
@@ -515,38 +516,78 @@ const LOCATION_TZ = {
   ARM: 'Asia/Yerevan', ARMENIA: 'Asia/Yerevan', AM: 'Asia/Yerevan',
 };
 const DEFAULT_TZ = process.env.DEFAULT_TZ || 'Asia/Ho_Chi_Minh';
-/* Danh mục ca của team. Cùng một ca nhưng giờ địa phương lệch 3 tiếng:
-   người ở Armenia vào sớm hơn người ở Việt Nam đúng 3 tiếng. */
-const SHIFTS = [
-  { code: 'sang',      name: 'Ca Sáng',        ARM: '07:00', VN: '10:00' },
-  { code: 'gay_sang',  name: 'Ca Gãy Sáng',    ARM: '09:00', VN: '12:00' },
-  { code: 'chieu',     name: 'Ca Chiều',       ARM: '15:00', VN: '18:00' },
-  { code: 'gay_chieu', name: 'Ca Gãy Chiều',   ARM: '17:00', VN: '20:00' },
-  { code: 'gay_dem',   name: 'Ca Gãy Đêm',     ARM: '21:00', VN: '00:00' },
-  { code: 'dem',       name: 'Ca Đêm',         ARM: '23:00', VN: '02:00' },
+/* Danh mục ca. Một ca xác định bằng CẢ giờ vào lẫn giờ ra, vì có ca trùng
+   giờ vào mà khác giờ ra: Ca Sáng VN 10:00-18:00 và CS ONL 10:00-20:00.
+   Mã ca dùng trong bộ lọc là chuỗi "10:00-20:00", không thể lẫn. */
+const SHIFT_NAMES = [
+  // Ca 8 tiếng — CS, VIP, RISK
+  { name: 'Ca Sáng',       ARM: '07:00-15:00', VN: '10:00-18:00' },
+  { name: 'Ca Gãy Sáng',   ARM: '09:00-17:00', VN: '12:00-20:00' },
+  { name: 'Ca Chiều',      ARM: '15:00-23:00', VN: '18:00-02:00' },
+  { name: 'Ca Gãy Chiều',  ARM: '17:00-01:00', VN: '20:00-04:00' },
+  { name: 'Ca Gãy Đêm',    ARM: '21:00-05:00', VN: '00:00-08:00' },
+  { name: 'Ca Đêm',        ARM: '23:00-07:00', VN: '02:00-10:00' },
+  // Ca 10 tiếng — CS ONL
+  { name: 'CS ONL Sáng',   ARM: '03:00-13:00', VN: '06:00-16:00' },
+  { name: 'CS ONL Trưa',   ARM: '07:00-17:00', VN: '10:00-20:00' },
+  { name: 'CS ONL Chiều',  ARM: '09:00-19:00', VN: '12:00-22:00' },
+  { name: 'CS ONL Tối',    ARM: '13:00-23:00', VN: '16:00-02:00' },
 ];
-const shiftByCode = (c) => SHIFTS.find((x) => x.code === c) || null;
 
-/* Ca của một người trong một ngày, suy từ giờ vào ca đã xếp */
-function caCuaNgay(userId, day, location) {
-  const row = db.prepare('SELECT start_hm FROM shift_days WHERE user_id=? AND day=?')
-    .get(userId, day);
-  if (!row) return null;
+/* Tên ca cho một cặp giờ. Không có trong danh mục thì lấy chính cặp giờ làm tên,
+   nhờ vậy KHÔNG ca nào rơi ra ngoài bộ lọc. */
+function tenCa(startHm, endHm, location) {
+  const ma = `${startHm}-${endHm}`;
   const loc = String(location || 'VN').toUpperCase() === 'ARM' ? 'ARM' : 'VN';
-  const found = SHIFTS.find((x) => x[loc] === row.start_hm);
-  return found ? found.code : null;
+  const found = SHIFT_NAMES.find((x) => x[loc] === ma);
+  return found ? found.name : ma;
 }
 
-/* Điều kiện SQL: chỉ lấy dòng thuộc ca đang chọn.
-   Giờ vào ca so theo khu vực của từng người, nên dùng CASE. */
+/* Ca của một người trong một ngày */
+function caCuaNgay(userId, day) {
+  const row = db.prepare('SELECT start_hm, end_hm FROM shift_days WHERE user_id=? AND day=?')
+    .get(userId, day);
+  return row ? `${row.start_hm}-${row.end_hm}` : null;
+}
+
+/* Danh sách ca để đổ vào ô lọc — dựng từ lịch THẬT đang có, kèm số người */
+function shiftOptions(scope = null) {
+  const rows = db.prepare(
+    `SELECT s.start_hm, s.end_hm, u.location, COUNT(DISTINCT u.id) n
+     FROM shift_days s JOIN users u ON u.id=s.user_id
+     WHERE u.role='staff' AND u.is_active=1 AND (? IS NULL OR u.brand=?)
+     GROUP BY s.start_hm, s.end_hm, u.location`).all(scope, scope);
+
+  const gop = new Map();
+  for (const r of rows) {
+    const ma = `${r.start_hm}-${r.end_hm}`;
+    const ten = tenCa(r.start_hm, r.end_hm, r.location);
+    if (!gop.has(ma)) gop.set(ma, { code: ma, name: ten, hours: ma, people: 0, locs: new Set() });
+    const g = gop.get(ma);
+    g.people += r.n;
+    g.locs.add(String(r.location || 'VN').toUpperCase() === 'ARM' ? 'ARM' : 'VN');
+    if (g.name === ma && ten !== ma) g.name = ten;      // ưu tiên tên có nghĩa
+  }
+
+  return [...gop.values()]
+    .map((g) => ({
+      code: g.code,
+      name: g.name === g.hours ? `Ca ${g.hours}` : `${g.name} · ${g.hours}`,
+      people: g.people,
+      locations: [...g.locs].join('/'),
+      in_use: true,
+    }))
+    .sort((a, b) => (a.code < b.code ? -1 : 1));
+}
+
+/* Điều kiện SQL lọc theo ca — so cặp giờ vào/ra của ngày đó */
 function dieuKienCa(code, cotNgay, cotUser) {
-  const sh = shiftByCode(code);
-  if (!sh) return null;
+  const m = String(code || '').match(/^(\d{2}:\d{2})-(\d{2}:\d{2})$/);
+  if (!m) return null;
   return {
     sql: `EXISTS (SELECT 1 FROM shift_days s WHERE s.user_id=${cotUser}
-            AND s.day=${cotNgay}
-            AND s.start_hm = CASE WHEN u.location='ARM' THEN ? ELSE ? END)`,
-    params: [sh.ARM, sh.VN],
+            AND s.day=${cotNgay} AND s.start_hm=? AND s.end_hm=?)`,
+    params: [m[1], m[2]],
   };
 }
 
@@ -778,14 +819,14 @@ function punchHistory(f = {}, viewer = null) {
   if (f.from)       { w.push('p.actual_at>=?'); p.push(new Date(f.from + 'T00:00:00').getTime()); }
   if (f.to)         { w.push('p.actual_at<=?'); p.push(new Date(f.to + 'T23:59:59').getTime()); }
   if (f.shift) {
-    const sh = shiftByCode(f.shift);
-    if (sh) {
+    const m = String(f.shift).match(/^(\d{2}:\d{2})-(\d{2}:\d{2})$/);
+    if (m) {
       w.push(`EXISTS (SELECT 1 FROM shift_days s WHERE s.user_id=p.user_id
-                AND s.start_hm = CASE WHEN u.location='ARM' THEN ? ELSE ? END
+                AND s.start_hm=? AND s.end_hm=?
                 AND s.day IN (
                   date(p.actual_at/1000,'unixepoch', CASE WHEN u.location='ARM' THEN '+4 hours' ELSE '+7 hours' END),
                   date(p.actual_at/1000,'unixepoch','-1 day', CASE WHEN u.location='ARM' THEN '+4 hours' ELSE '+7 hours' END)))`);
-      p.push(sh.ARM, sh.VN);
+      p.push(m[1], m[2]);
     }
   }
   if (f.late_level) { w.push('p.late_level=?'); p.push(f.late_level); }
@@ -947,8 +988,10 @@ function shiftLog(f = {}, scope = null) {
   // Giờ mới cắt theo ngày ca — lúc này mỗi ca đã gộp đủ hai đầu
   const trongKhoang = list
     .map((x) => {
-      const code = caCuaNgay(x.user_id, x.day, (userRow.get(x.user_id) || {}).location);
-      return { ...x, shift_code: code, shift_name: (shiftByCode(code) || {}).name || null };
+      const code = caCuaNgay(x.user_id, x.day);
+      const loc = (userRow.get(x.user_id) || {}).location;
+      return { ...x, shift_code: code,
+        shift_name: code ? tenCa(code.slice(0, 5), code.slice(6), loc) : null };
     })
     .filter((x) => (!f.from || x.day >= f.from) && (!f.to || x.day <= f.to)
                 && (!f.shift || x.shift_code === f.shift));
@@ -1057,14 +1100,14 @@ function lateByUser(f = {}, scope = null) {
   if (f.brand)         { w.push('p.brand=?');       p.push(f.brand); }
   if (f.location)      { w.push('u.location=?');    p.push(f.location); }
   if (f.shift) {
-    const sh = shiftByCode(f.shift);
-    if (sh) {
+    const m = String(f.shift).match(/^(\d{2}:\d{2})-(\d{2}:\d{2})$/);
+    if (m) {
       w.push(`EXISTS (SELECT 1 FROM shift_days s WHERE s.user_id=p.user_id
-                AND s.start_hm = CASE WHEN u.location='ARM' THEN ? ELSE ? END
+                AND s.start_hm=? AND s.end_hm=?
                 AND s.day IN (
                   date(p.actual_at/1000,'unixepoch', CASE WHEN u.location='ARM' THEN '+4 hours' ELSE '+7 hours' END),
                   date(p.actual_at/1000,'unixepoch','-1 day', CASE WHEN u.location='ARM' THEN '+4 hours' ELSE '+7 hours' END)))`);
-      p.push(sh.ARM, sh.VN);
+      p.push(m[1], m[2]);
     }
   }
   if (f.late_level)    { w.push('p.late_level=?');  p.push(f.late_level); }
@@ -2056,7 +2099,7 @@ module.exports = {
   types, typeByCode, sweepStale, openFor, holderOf, lanes, present,
   startActivity, stopActivity, stateFor, history, allUsers, audit, lockKey,
   PUNCH_KINDS, PUNCH_ACTIVE, LATE_LEVELS, MAX_OFF_PER_MONTH,
-  SHIFTS, shiftByCode, caCuaNgay,
+  SHIFT_NAMES, tenCa, caCuaNgay, shiftOptions,
   SHIFT_EARLY_MIN, LATE_IN_1, LATE_IN_2, LATE_OUT_1,
   punch, shiftToday, punchHistory, lateByUser, scheduledFor,
   myOffs, toggleOff, offSummary, setLock, isLocked, whoOff, MAX_OFF_PER_DAY_DEPT,
