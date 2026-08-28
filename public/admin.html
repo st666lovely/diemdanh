@@ -779,7 +779,9 @@ async function loadReports(refresh) {
       <span class="sub">tab ${esc(x.tab)} · ${x.id_short}</span>
       <span class="sp"></span>
       ${x.error ? `<span class="pill red">${esc(x.error)}</span>`
-                : `<span class="pill pri">${x.rows} dòng</span>`}
+                : `<span class="pill pri">${x.rows} dòng</span>`
+                  + (x.grid_rows ? `<span class="sub"> / ${x.grid_rows} dòng trong file</span>` : '')
+                  + (x.warn ? `<span class="pill amb">${esc(x.warn)}</span>` : '')}
     </div>`).join('');
 
   const shBox = !sh.configured
