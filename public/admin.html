@@ -589,6 +589,24 @@ async function loadRollCalls() {
       </div>
     </div>
 
+    <div class="sec"><span class="t">Cho xuống ca sớm</span><span class="rule"></span></div>
+    <div class="card card-p" style="margin-bottom:var(--s4)">
+      <div class="row">
+        <div class="f"><label>Nhân viên</label>
+          <select id="outWho">
+            <option value="">— chọn nhân viên —</option>
+            ${(d.users || []).map(u => `<option value="${u.id}">${esc(u.name)}</option>`).join('')}
+          </select></div>
+        <button class="btn btn-pri" onclick="forceOut()">Cho xuống ca ngay</button>
+      </div>
+      <div class="note" style="font-size:12.5px;color:var(--tx-3);margin-top:9px;line-height:1.55">
+        Nhân viên tự bấm "Xuống ca" khi còn hơn <b>${d.config.early_out_block_min ?? 60} phút</b>
+        nữa mới hết ca sẽ bị hệ thống chặn để tránh huỷ các lượt điểm danh còn lại.
+        Chỉ sử dụng nút này khi nhân viên <b>thật sự cần xuống ca sớm</b>.
+        Khi quản trị cho xuống ca, các lượt điểm danh còn treo của ca đó cũng sẽ được huỷ như bình thường.
+      </div>
+    </div>
+
     <div class="sec"><span class="t">Điểm danh tự động</span><span class="rule"></span>
       <span class="r">${d.config.per_shift} lượt mỗi ca · tự chạy hằng ngày, không cần nhắc</span></div>
     ${upcomingBox(d)}
@@ -707,6 +725,28 @@ async function fireRollCall() {
   const r = await api('/api/admin/rollcalls/fire', { method: 'POST', body: { who, window_min: win } });
   toast(r.ok ? 'Đã bắn' : 'Không bắn được', r.message || '', !!r.ok);
   loadRollCalls();
+}
+
+async function forceOut() {
+  const sel = $('#outWho');
+  if (!sel) return;
+
+  const id = sel.value;
+  if (!id) {
+    toast('Chưa chọn nhân viên', 'Chọn nhân viên trước khi cho xuống ca.', false);
+    return;
+  }
+
+  const name = sel.options[sel.selectedIndex].text;
+  if (!confirm(`Cho ${name} xuống ca ngay bây giờ? Các lượt điểm danh còn lại của ca sẽ bị huỷ.`)) return;
+
+  const r = await api(`/api/admin/users/${id}/punch-out`, { method: 'POST' });
+  toast(r.ok ? 'Đã cho xuống ca' : 'Không thực hiện được', r.message || '', !!r.ok);
+
+  if (r.ok) {
+    sel.value = '';
+    loadRollCalls();
+  }
 }
 
 /* Lượt điểm danh sắp tới — biết trước tới lượt ai, khỏi ngồi đoán */
