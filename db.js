@@ -1632,26 +1632,42 @@ function hasCheckedOut(user) {
 }
 
 /* Huỷ các lượt điểm danh còn treo — gọi khi bấm Xuống ca */
+/* Xuống ca thì huỷ các lượt CHƯA TỚI GIỜ. Lượt đã tới hạn mà chưa trả lời
+   vẫn để nguyên cho vòng quét xử lý — không thì bấm xuống ca là xoá sạch dấu vết
+   những lượt vừa bỏ lỡ. */
 function cancelPendingRollCalls(userId) {
+  const t = now();
   const r = db.prepare(
     "UPDATE roll_calls SET status='cancelled', defer_reason='Đã xuống ca' " +
-    "WHERE user_id=? AND status IN ('pending','waiting')"
-  ).run(userId);
+    "WHERE user_id=? AND status IN ('pending','waiting') " +
+    "AND (due_at IS NULL OR due_at > ?)"
+  ).run(userId, t);
   return r.changes;
 }
 
 function planRollCalls(user, day, startUtc, endUtc) {
+  /* Chỉ đếm lượt CÒN HIỆU LỰC. Lượt đã huỷ vì xuống ca không được chặn việc
+     sinh lịch mới — nếu không, người xuống ca rồi lên lại sẽ không bị điểm danh
+     lần nào nữa trong ngày. */
   const existed = db.prepare(
-    "SELECT COUNT(*) n FROM roll_calls WHERE user_id=? AND day=? AND is_makeup=0"
+    "SELECT COUNT(*) n FROM roll_calls WHERE user_id=? AND day=? AND is_makeup=0 " +
+    "AND status <> 'cancelled'"
   ).get(user.id, day).n;
   if (existed > 0) return 0;
 
+  const t = now();
   const pad = 20 * 60000, minGap = 25 * 60000;
-  const from = startUtc + pad, to = endUtc - pad;
+  // Sinh lại giữa ca thì chỉ rải trong phần thời gian còn lại
+  const from = Math.max(startUtc + pad, t + 60000);
+  const to = endUtc - pad;
   if (to <= from) return 0;
 
+  // Còn ít thời gian thì giảm số lượt cho khỏi dồn cục
+  const soLuot = Math.max(1, Math.min(RC_PER_SHIFT,
+    Math.floor((to - from) / minGap) + 1));
+
   const picks = [];
-  for (let i = 0; i < RC_PER_SHIFT * 6 && picks.length < RC_PER_SHIFT; i++) {
+  for (let i = 0; i < soLuot * 6 && picks.length < soLuot; i++) {
     const t = from + Math.floor(Math.random() * (to - from));
     if (picks.every((p) => Math.abs(p - t) >= minGap)) picks.push(t);
   }
