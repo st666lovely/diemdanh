@@ -118,7 +118,7 @@ $('#pw').addEventListener('click', async () => {
 /* Giá trị bộ lọc phải giữ trong JS, không đọc từ DOM.
    Bảng được vẽ lại sau mỗi lần lọc, nếu chỉ đọc DOM thì lựa chọn cũ biến mất
    và không kết hợp được nhiều tiêu chí. */
-const BOARD_KEYS = ['user_id','type_code','brand','department','location','from','to','only'];
+const BOARD_KEYS = ['user_id','type_code','brand','department','location','shift','from','to','only'];
 let boardQ = Object.fromEntries(BOARD_KEYS.map(k => [k, k === 'only' ? 'active' : '']));
 
 function qRead() {
@@ -166,6 +166,7 @@ function renderBoard() {
         ${r.brand ? `<span class="pill pri">${r.brand}</span>` : ''}</div></td>
     <td>${r.type_name}<div class="sub">cho phép ${r.limit_minutes} phút</div></td>
     <td>${dmy(r.started_at)}<div class="sub">${hms(r.started_at)}</div>
+      ${r.shift_name ? `<div class="sub">${r.shift_name}</div>` : ''}
       ${r.shift_day && r.shift_day !== isoDay(r.started_at)
         ? `<div class="sub">thuộc ca ${r.shift_day.split('-').reverse().slice(0, 2).join('/')}</div>` : ''}</td>
     <td>${hms(r.ended_at)}${r.qua_dem ? ' <span class="pill">+1</span>' : ''}</td>
@@ -199,8 +200,12 @@ function renderBoard() {
         B.users.filter(u=>u.role==='staff').map(u=>`<option value="${u.id}"${mark('user_id',u.id)}>${esc(u.name)}</option>`).join(''),'Tất cả')}</div>
       <div class="f"><label>Hoạt động</label>${sel('type_code',
         B.types.map(t=>`<option value="${t.code}"${mark('type_code',t.code)}>${t.name}</option>`).join(''),'Tất cả')}</div>
+      <div class="f"><label>Ca</label>${sel('shift',
+        (B.shifts||[]).map(c=>`<option value="${c.code}"${mark('shift',c.code)}>${c.name}</option>`).join(''),'Tất cả ca')}</div>
       <div class="f"><label>Bộ phận</label>${sel('department',
         B.departments.map(d=>`<option${mark('department',d)}>${d}</option>`).join(''),'Tất cả')}</div>
+      <div class="f"><label>Khu vực</label>${sel('location',
+        ['VN','ARM'].map(x=>`<option${mark('location',x)}>${x}</option>`).join(''),'Tất cả')}</div>
       ${B.brands.length > 1 ? `<div class="f"><label>Brand</label>${sel('brand',
         B.brands.map(b=>`<option${mark('brand',b)}>${b}</option>`).join(''),'Tất cả')}</div>` : ''}
       <div class="f"><label>Từ ngày</label><input type="date" data-q="from" value="${boardQ.from}" onchange="qSet()"></div>
@@ -1036,7 +1041,7 @@ async function admToggleActive(id, active) {
 
 /* ---------- Khung ---------- */
 /* ---------- Bộ lọc dùng chung cho tab Chấm công / Trễ ---------- */
-const PUNCH_KEYS = ['user_id','kind','department','brand','location','from','to','late_level'];
+const PUNCH_KEYS = ['user_id','kind','department','brand','location','shift','from','to','late_level'];
 let punchQ = Object.fromEntries(PUNCH_KEYS.map(k => [k, '']));
 
 function pRead() {
@@ -1075,8 +1080,12 @@ function punchFilters(d, mode) {
           Object.entries(d.levels).map(([k, v]) => `<option value="${k}"${mark('late_level', k)}>${v.label}</option>`).join(''), 'Tất cả')}</div>`
       : `<div class="f"><label>Loại</label>${sel('kind',
           Object.entries(d.kinds).map(([k, v]) => `<option value="${k}"${mark('kind', k)}>${v}</option>`).join(''), 'Tất cả')}</div>`}
+    <div class="f"><label>Ca</label>${sel('shift',
+      (d.shifts || []).map(c => `<option value="${c.code}"${mark('shift', c.code)}>${c.name}</option>`).join(''), 'Tất cả ca')}</div>
     <div class="f"><label>Bộ phận</label>${sel('department',
       d.departments.map(x => `<option${mark('department', x)}>${x}</option>`).join(''), 'Tất cả')}</div>
+    <div class="f"><label>Khu vực</label>${sel('location',
+      ['VN', 'ARM'].map(x => `<option${mark('location', x)}>${x}</option>`).join(''), 'Tất cả')}</div>
     ${d.brands.length > 1 ? `<div class="f"><label>Brand</label>${sel('brand',
       d.brands.map(x => `<option${mark('brand', x)}>${x}</option>`).join(''), 'Tất cả')}</div>` : ''}
     <div class="f"><label>Từ ngày</label><input type="date" data-p="from" value="${punchQ.from}" onchange="${fn}"></div>
@@ -1146,6 +1155,7 @@ async function loadShiftLog() {
         <span class="pill">${x.department || '—'}</span>
         ${x.brand ? `<span class="pill pri">${x.brand}</span>` : ''}</div></td>
     <td>${x.day.split('-').reverse().join('/')}
+      ${x.shift_name ? `<div class="sub">${x.shift_name}</div>` : ''}
       ${x.qua_dem ? '<div class="sub">ra sáng hôm sau</div>' : ''}</td>
     <td class="c mono">${gio(x.in_at)}</td>
     <td class="c">${x.in_at ? treBadge(x.in_late, x.in_late_min) : '<span class="sub">—</span>'}</td>
