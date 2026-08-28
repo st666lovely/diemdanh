@@ -69,8 +69,31 @@
     if (el) el.href = '/manifest.webmanifest?k=' + m[1].toUpperCase();
   }
   if ('serviceWorker' in navigator) {
-    window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('/sw.js').then((reg) => {
+        // Có bản mới thì kích hoạt ngay, khỏi phải Ctrl+Shift+R sau mỗi lần deploy
+        reg.addEventListener('updatefound', () => {
+          const sw = reg.installing;
+          if (!sw) return;
+          sw.addEventListener('statechange', () => {
+            if (sw.state === 'installed' && navigator.serviceWorker.controller) {
+              sw.postMessage('skip-waiting');
+            }
+          });
+        });
+        reg.update();
+      }).catch(() => {});
+    });
+
+    // Bản mới tiếp quản thì tải lại đúng một lần
+    let daNapLai = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (daNapLai) return;
+      daNapLai = true;
+      location.reload();
+    });
   }
+
 })();
 
 const $ = s => document.querySelector(s);
@@ -489,6 +512,7 @@ async function punch(kind) {
   if (r.photo_required) { toast('Cần ảnh chụp', r.message, false); return; }
   if (r.key_required) { toast('Mã cá nhân', r.message, false); return; }
   if (r.mobile_blocked) { showGate('mobile'); return; }
+  if (r.emp_required) { toast('Mã NV', r.message, false); return; }
   if (r.not_on_shift || r.already_in) { toast('Chưa thực hiện được', r.message, false); return; }
   if (r.report_required) {
     if (r.report) REP = r.report;
@@ -803,9 +827,9 @@ function reportCard() {
         ? `Ngày ${nợ.slice(0, 6).join(', ')}${nợ.length > 6 ? '…' : ''}. Còn nợ thì không vào ca mới được.`
         : `Chưa có dòng nào mang mã <b>${REP.emp_code}</b> hôm nay ở bất kỳ file nào.`
           + ((REP.sheets || []).length ? `<br>Các file: ${REP.sheets.map(x => x.name).join(', ')}.` : '')
-          + ' Hoàn thành báo cáo, sau đó bấm "Đã hoàn tất báo cáo".'}</div>
+          + ' Điền một file bất kỳ rồi bấm "Tôi đã điền rồi".'}</div>
       <div class="acts">
-        <button class="btn btn-sm" onclick="recheckReport()">Đã hoàn tất báo cáo</button>
+        <button class="btn btn-sm" onclick="recheckReport()">Tôi đã điền rồi</button>
         ${noHomNay ? '<button class="btn btn-sm" onclick="noActivity()">Ca không phát sinh</button>' : ''}
       </div>
     </div>
@@ -819,9 +843,18 @@ async function loadReport(force) {
   } catch (e) {}
 }
 
+/* Hỏi Mã NV trước khi mở khoá chốt chặn báo cáo */
+function askEmp(việc) {
+  const m = prompt(`Nhập Mã NV của bạn để ${việc}\n\nDạng ST666-770, xem trong sheet báo cáo.`);
+  return m === null ? null : String(m).trim();
+}
+
 async function recheckReport() {
-  if (busy) return; busy = true;
-  const r = await api('/api/report/recheck', {});
+  if (busy) return;
+  const e = askEmp('xác nhận đã điền báo cáo');
+  if (e === null) return;
+  busy = true;
+  const r = await api('/api/report/recheck', { emp_code: e });
   busy = false;
   if (r.report) REP = r.report;
   if (REP && REP.today && REP.today.rows > 0) repBlocked = false;
@@ -857,7 +890,9 @@ async function clearOT() {
 async function noActivity() {
   const lý = prompt('Ca này không phát sinh việc gì?\n\nGhi rõ lý do (ít nhất 10 ký tự):');
   if (!lý) return;
-  const r = await api('/api/report/no-activity', { reason: lý.trim() });
+  const e = askEmp('khai ca không phát sinh');
+  if (e === null) return;
+  const r = await api('/api/report/no-activity', { reason: lý.trim(), emp_code: e });
   toast(r.ok ? 'Đã ghi nhận' : 'Chưa ghi được', r.message || '', !!r.ok);
   if (r.ok) loadReport(true);
 }
