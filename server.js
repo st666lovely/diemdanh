@@ -421,7 +421,7 @@ app.post('/api/ot', requireUser, blockMobile, requireKey, (req, res) => {
   res.status(r.ok ? 200 : 400).json({ ...r, shift: D.shiftToday(req.user) });
 });
 
-app.delete('/api/ot', requireUser, requireKey, (req, res) => {
+app.delete('/api/ot', requireUser, blockMobile, requireKey, (req, res) => {
   const day = D.todayOf(req.user);
   const r = D.clearOT(req.user.id, day);
   D.audit(req.user, 'ot_clear', day, req.ip);
@@ -711,8 +711,28 @@ app.get('/api/report/status', requireUser, async (req, res) => {
   res.json(await reportStatus(req.user, req.query.refresh === '1'));
 });
 
+/* Hai nút mở khoá chốt chặn báo cáo phải khai đúng Mã NV của mình.
+   Mã NV không bí mật, nên đây là bước xác nhận có chủ đích chứ không phải
+   xác thực — cốt để không ai bấm nhầm hoặc bấm hộ cho xong. */
+function requireEmpCode(req, res, next) {
+  if (req.user.role !== 'staff') return next();
+  const dung = String(req.user.emp_code || '').trim().toUpperCase();
+  const khai = String((req.body || {}).emp_code || '').trim().toUpperCase();
+
+  if (!dung) {
+    return res.status(400).json({ ok: false, emp_required: true,
+      message: 'Bạn chưa có Mã NV. Báo quản lý cấp mã trước khi dùng nút này.' });
+  }
+  if (khai !== dung) {
+    D.audit(req.user, 'emp_code_wrong', khai.slice(0, 32), req.ip);
+    return res.status(403).json({ ok: false, emp_required: true,
+      message: 'Mã NV không đúng. Nhập đúng mã của bạn, ví dụ ST666-770.' });
+  }
+  next();
+}
+
 /* Nút "Tôi đã điền rồi" — đọc lại sheet ngay, không chờ tới lượt quét */
-app.post('/api/report/recheck', requireUser, async (req, res) => {
+app.post('/api/report/recheck', requireUser, blockMobile, requireEmpCode, async (req, res) => {
   const st = await reportStatus(req.user, true);
   res.json({
     ok: true, report: st,
@@ -726,7 +746,7 @@ app.post('/api/report/recheck', requireUser, async (req, res) => {
 });
 
 /* Ca không phát sinh việc — vẫn phải khai, để phân biệt với quên điền */
-app.post('/api/report/no-activity', requireUser, (req, res) => {
+app.post('/api/report/no-activity', requireUser, blockMobile, requireEmpCode, (req, res) => {
   const day = D.todayOf(req.user);
   const reason = String((req.body || {}).reason || '').trim();
   if (reason.length < 10) {
