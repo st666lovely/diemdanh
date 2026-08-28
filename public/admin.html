@@ -165,8 +165,10 @@ function renderBoard() {
         <span class="pill">${r.department || '—'}</span>
         ${r.brand ? `<span class="pill pri">${r.brand}</span>` : ''}</div></td>
     <td>${r.type_name}<div class="sub">cho phép ${r.limit_minutes} phút</div></td>
-    <td>${dmy(r.started_at)}<div class="sub">${hms(r.started_at)}</div></td>
-    <td>${hms(r.ended_at)}</td>
+    <td>${dmy(r.started_at)}<div class="sub">${hms(r.started_at)}</div>
+      ${r.shift_day && r.shift_day !== isoDay(r.started_at)
+        ? `<div class="sub">thuộc ca ${r.shift_day.split('-').reverse().slice(0, 2).join('/')}</div>` : ''}</td>
+    <td>${hms(r.ended_at)}${r.qua_dem ? ' <span class="pill">+1</span>' : ''}</td>
     <td>${r.duration_sec == null ? '<span class="pill amb">Đang chạy</span>'
       : `<span style="font-weight:600">${Math.floor(r.duration_sec/60)}p${pad(r.duration_sec%60)}s</span>
          <div style="margin-top:4px"><span class="pill ${r.is_over_limit ? 'red' : 'pri'}">${r.is_over_limit ? 'Quá giờ' : 'Trong giờ'}</span></div>`}</td>
