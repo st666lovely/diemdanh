@@ -815,6 +815,52 @@ app.post('/api/punch', requireUser, blockMobile, requireKey,
   res.status(r.ok ? 200 : 400).json({ ...r, shift: D.shiftToday(req.user) });
 });
 
+/* --- Quản trị cho một nhân viên xuống ca sớm, bỏ qua chặn EARLY_OUT_BLOCK_MIN.
+   Dùng khi nhân viên được phép về sớm hoặc có việc đột xuất.
+   Vẫn huỷ các lượt điểm danh còn treo và ghi audit rõ quản trị nào thao tác. --- */
+app.post('/api/admin/users/:id/punch-out', requireUser, requireAdmin, (req, res) => {
+  const u = D.db.prepare('SELECT * FROM users WHERE id=?').get(+req.params.id);
+
+  if (!u || !D.inScope(req.scope, u.brand)) {
+    return res.status(404).json({
+      ok: false,
+      message: 'Không tìm thấy nhân viên trong phạm vi của bạn.'
+    });
+  }
+
+  // db.js bản mới có chữ ký:
+  // punch(user, kind, ip, ua, photoPath, screenPath, opts)
+  // Admin không cần selfie/screenshot khi bấm hộ nên truyền null cho 2 tham số ảnh.
+  const r = D.punch(
+    u,
+    'out',
+    req.ip,
+    `admin:${req.user.username || req.user.name || 'unknown'}`,
+    null,
+    null,
+    { bypassEarlyOut: true }
+  );
+
+  if (r.ok) {
+    const n = D.cancelPendingRollCalls(u.id);
+    if (n) {
+      r.message += ` Đã huỷ ${n} lượt điểm danh còn treo.`;
+    }
+
+    D.audit(
+      req.user,
+      'force_out',
+      `${u.name}${n ? ` — huỷ ${n} lượt điểm danh` : ''}`,
+      req.ip
+    );
+  }
+
+  res.status(r.ok ? 200 : 400).json({
+    ...r,
+    shift: D.shiftToday(u)
+  });
+});
+
 /* --- Lịch sử chấm công. Nhân viên chỉ thấy của mình, quản trị thấy hết. --- */
 /* Danh sách brand cho ô lọc: nhân viên không cần, admin chỉ brand mình, super cả hai */
 function brandOptions(user) {
