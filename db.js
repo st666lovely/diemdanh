@@ -456,14 +456,17 @@ function history(f = {}, scope = null) {
   const coNgay = rows.map((r) => ({
     ...r, shift_day: shiftDayOf(r.user_id, r.started_at, tzOf(r.location || 'VN')),
   }));
-  const trongKhoang = coNgay.filter((r) =>
-    (!f.from || r.shift_day >= f.from) && (!f.to || r.shift_day <= f.to));
+  const trongKhoang = coNgay
+    .map((r) => ({ ...r, shift_code: caCuaNgay(r.user_id, r.shift_day, r.location) }))
+    .filter((r) => (!f.from || r.shift_day >= f.from) && (!f.to || r.shift_day <= f.to)
+                && (!f.shift || r.shift_code === f.shift));
 
   return {
     rows: trongKhoang.map((r) => ({
       ...present(r), ended_at: r.ended_at, duration_sec: r.duration_sec,
       is_over_limit: !!r.is_over_limit, closed_by: r.closed_by, ip: r.ip,
-      shift_day: r.shift_day,
+      shift_day: r.shift_day, shift_code: r.shift_code,
+      shift_name: (shiftByCode(r.shift_code) || {}).name || null,
       // Bắt đầu một ngày, kết thúc sang ngày khác
       qua_dem: !!(r.ended_at
         && dayInTz(r.started_at, tzOf(r.location || 'VN'))
@@ -512,6 +515,41 @@ const LOCATION_TZ = {
   ARM: 'Asia/Yerevan', ARMENIA: 'Asia/Yerevan', AM: 'Asia/Yerevan',
 };
 const DEFAULT_TZ = process.env.DEFAULT_TZ || 'Asia/Ho_Chi_Minh';
+/* Danh mục ca của team. Cùng một ca nhưng giờ địa phương lệch 3 tiếng:
+   người ở Armenia vào sớm hơn người ở Việt Nam đúng 3 tiếng. */
+const SHIFTS = [
+  { code: 'sang',      name: 'Ca Sáng',        ARM: '07:00', VN: '10:00' },
+  { code: 'gay_sang',  name: 'Ca Gãy Sáng',    ARM: '09:00', VN: '12:00' },
+  { code: 'chieu',     name: 'Ca Chiều',       ARM: '15:00', VN: '18:00' },
+  { code: 'gay_chieu', name: 'Ca Gãy Chiều',   ARM: '17:00', VN: '20:00' },
+  { code: 'gay_dem',   name: 'Ca Gãy Đêm',     ARM: '21:00', VN: '00:00' },
+  { code: 'dem',       name: 'Ca Đêm',         ARM: '23:00', VN: '02:00' },
+];
+const shiftByCode = (c) => SHIFTS.find((x) => x.code === c) || null;
+
+/* Ca của một người trong một ngày, suy từ giờ vào ca đã xếp */
+function caCuaNgay(userId, day, location) {
+  const row = db.prepare('SELECT start_hm FROM shift_days WHERE user_id=? AND day=?')
+    .get(userId, day);
+  if (!row) return null;
+  const loc = String(location || 'VN').toUpperCase() === 'ARM' ? 'ARM' : 'VN';
+  const found = SHIFTS.find((x) => x[loc] === row.start_hm);
+  return found ? found.code : null;
+}
+
+/* Điều kiện SQL: chỉ lấy dòng thuộc ca đang chọn.
+   Giờ vào ca so theo khu vực của từng người, nên dùng CASE. */
+function dieuKienCa(code, cotNgay, cotUser) {
+  const sh = shiftByCode(code);
+  if (!sh) return null;
+  return {
+    sql: `EXISTS (SELECT 1 FROM shift_days s WHERE s.user_id=${cotUser}
+            AND s.day=${cotNgay}
+            AND s.start_hm = CASE WHEN u.location='ARM' THEN ? ELSE ? END)`,
+    params: [sh.ARM, sh.VN],
+  };
+}
+
 const LOCATIONS = ['VN', 'ARM'];
 
 /* Phạm vi của một tài khoản quản trị.
@@ -739,6 +777,17 @@ function punchHistory(f = {}, viewer = null) {
   if (f.brand)      { w.push('p.brand=?');      p.push(f.brand); }
   if (f.from)       { w.push('p.actual_at>=?'); p.push(new Date(f.from + 'T00:00:00').getTime()); }
   if (f.to)         { w.push('p.actual_at<=?'); p.push(new Date(f.to + 'T23:59:59').getTime()); }
+  if (f.shift) {
+    const sh = shiftByCode(f.shift);
+    if (sh) {
+      w.push(`EXISTS (SELECT 1 FROM shift_days s WHERE s.user_id=p.user_id
+                AND s.start_hm = CASE WHEN u.location='ARM' THEN ? ELSE ? END
+                AND s.day IN (
+                  date(p.actual_at/1000,'unixepoch', CASE WHEN u.location='ARM' THEN '+4 hours' ELSE '+7 hours' END),
+                  date(p.actual_at/1000,'unixepoch','-1 day', CASE WHEN u.location='ARM' THEN '+4 hours' ELSE '+7 hours' END)))`);
+      p.push(sh.ARM, sh.VN);
+    }
+  }
   if (f.late_level) { w.push('p.late_level=?'); p.push(f.late_level); }
   if (f.only_late)  w.push('p.late_level IS NOT NULL');
 
@@ -896,8 +945,13 @@ function shiftLog(f = {}, scope = null) {
   }).sort((a, b) => (b.in_at || b.out_at || 0) - (a.in_at || a.out_at || 0));
 
   // Giờ mới cắt theo ngày ca — lúc này mỗi ca đã gộp đủ hai đầu
-  const trongKhoang = list.filter((x) =>
-    (!f.from || x.day >= f.from) && (!f.to || x.day <= f.to));
+  const trongKhoang = list
+    .map((x) => {
+      const code = caCuaNgay(x.user_id, x.day, (userRow.get(x.user_id) || {}).location);
+      return { ...x, shift_code: code, shift_name: (shiftByCode(code) || {}).name || null };
+    })
+    .filter((x) => (!f.from || x.day >= f.from) && (!f.to || x.day <= f.to)
+                && (!f.shift || x.shift_code === f.shift));
 
   return {
     rows: trongKhoang,
@@ -1002,6 +1056,17 @@ function lateByUser(f = {}, scope = null) {
   if (f.department)    { w.push('p.department=?');  p.push(f.department); }
   if (f.brand)         { w.push('p.brand=?');       p.push(f.brand); }
   if (f.location)      { w.push('u.location=?');    p.push(f.location); }
+  if (f.shift) {
+    const sh = shiftByCode(f.shift);
+    if (sh) {
+      w.push(`EXISTS (SELECT 1 FROM shift_days s WHERE s.user_id=p.user_id
+                AND s.start_hm = CASE WHEN u.location='ARM' THEN ? ELSE ? END
+                AND s.day IN (
+                  date(p.actual_at/1000,'unixepoch', CASE WHEN u.location='ARM' THEN '+4 hours' ELSE '+7 hours' END),
+                  date(p.actual_at/1000,'unixepoch','-1 day', CASE WHEN u.location='ARM' THEN '+4 hours' ELSE '+7 hours' END)))`);
+      p.push(sh.ARM, sh.VN);
+    }
+  }
   if (f.late_level)    { w.push('p.late_level=?');  p.push(f.late_level); }
   if (f.from)          { w.push('p.actual_at>=?');  p.push(new Date(f.from + 'T00:00:00').getTime()); }
   if (f.to)            { w.push('p.actual_at<=?');  p.push(new Date(f.to + 'T23:59:59').getTime()); }
@@ -1767,6 +1832,10 @@ function rollCallReport(f = {}, scope = null) {
   if (f.location)     { w.push("u.location=?"); p.push(f.location); }
   if (f.from)         { w.push("r.day>=?"); p.push(f.from); }
   if (f.to)           { w.push("r.day<=?"); p.push(f.to); }
+  if (f.shift) {
+    const dk = dieuKienCa(f.shift, 'r.day', 'r.user_id');
+    if (dk) { w.push(dk.sql); p.push(...dk.params); }
+  }
   const where = w.length ? "WHERE " + w.join(" AND ") : "";
 
   const rows = db.prepare(
@@ -1987,6 +2056,7 @@ module.exports = {
   types, typeByCode, sweepStale, openFor, holderOf, lanes, present,
   startActivity, stopActivity, stateFor, history, allUsers, audit, lockKey,
   PUNCH_KINDS, PUNCH_ACTIVE, LATE_LEVELS, MAX_OFF_PER_MONTH,
+  SHIFTS, shiftByCode, caCuaNgay,
   SHIFT_EARLY_MIN, LATE_IN_1, LATE_IN_2, LATE_OUT_1,
   punch, shiftToday, punchHistory, lateByUser, scheduledFor,
   myOffs, toggleOff, offSummary, setLock, isLocked, whoOff, MAX_OFF_PER_DAY_DEPT,
