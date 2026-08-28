@@ -501,6 +501,11 @@ const LATE_IN_1  = Math.max(1, Number(process.env.LATE_IN_MIN1) || 1);    // tr�
 const LATE_IN_2  = Math.max(2, Number(process.env.LATE_IN_MIN2) || 30);   // trễ nặng từ 30 phút
 const LATE_OUT_1 = Math.max(1, Number(process.env.LATE_OUT_MIN) || 60);   // xuống ca trễ từ 60 phút
 
+// Chặn "Xuống ca" nếu còn sớm hơn giờ ca kết thúc quá bấy nhiêu phút.
+// Mặc định 60 phút, có thể chỉnh qua biến môi trường EARLY_OUT_BLOCK_MIN.
+// Có thể bỏ qua chặn này khi gọi punch(..., { bypassEarlyOut: true }) từ luồng quản trị.
+const EARLY_OUT_BLOCK_MIN = Math.max(0, Number(process.env.EARLY_OUT_BLOCK_MIN) || 60);
+
 const LATE_LEVELS = {
   in5:   { label: `Trễ lên ca ~${LATE_IN_1}p`,    kind: 'in',  min: LATE_IN_1 },
   in30:  { label: `Trễ lên ca ~${LATE_IN_2}p`,   kind: 'in',  min: LATE_IN_2 },
@@ -700,7 +705,7 @@ function lateOf(kind, diffMin) {
   return null;
 }
 
-function punch(user, kind, ip, ua, photoPath, screenPath) {
+function punch(user, kind, ip, ua, photoPath, screenPath, opts = {}) {
   if (!PUNCH_ACTIVE.includes(kind)) return { ok: false, message: 'Loại chấm công không hợp lệ.' };
 
   const st = shiftToday(user);
@@ -728,6 +733,27 @@ function punch(user, kind, ip, ua, photoPath, screenPath) {
   const at = now();
   const tz = tzOf(user.location);
   const sched = scheduledFor(user, kind, at);
+
+  // Chặn nhân viên tự Xuống ca quá sớm. Nếu còn hơn EARLY_OUT_BLOCK_MIN phút
+  // mới hết ca theo lịch thì từ chối ngay, nhờ vậy không làm huỷ các lượt
+  // điểm danh còn lại của ca. Luồng quản trị có thể truyền bypassEarlyOut=true.
+  if (kind === 'out' && sched && !opts.bypassEarlyOut) {
+    const soonMin = Math.round((sched - at) / 60000);
+    if (soonMin > EARLY_OUT_BLOCK_MIN) {
+      const gioHet = new Date(sched).toLocaleTimeString('vi-VN', {
+        hour12: false, timeZone: tz,
+      }).slice(0, 5);
+      return {
+        ok: false,
+        early_out: true,
+        minutes_left: soonMin,
+        scheduled_at: sched,
+        message: `Còn khoảng ${soonMin} phút nữa mới hết ca (dự kiến ${gioHet}) — `
+          + `chưa thể tự xuống ca. Nếu cần xuống sớm thật, nhờ quản trị xử lý giúp.`,
+      };
+    }
+  }
+
   // Cắt phần giây thay vì làm tròn: bấm lúc 20:43:57 với ca 20:43 là 0 phút,
   // không phải 1 phút. Trễ chỉ tính khi đã qua trọn một phút.
   const diff = sched ? Math.floor((at - sched) / 60000) : 0;
@@ -2116,7 +2142,7 @@ module.exports = {
   startActivity, stopActivity, stateFor, history, allUsers, audit, lockKey,
   PUNCH_KINDS, PUNCH_ACTIVE, LATE_LEVELS, MAX_OFF_PER_MONTH,
   SHIFT_NAMES, tenCa, caCuaNgay, shiftOptions,
-  SHIFT_EARLY_MIN, LATE_IN_1, LATE_IN_2, LATE_OUT_1,
+  SHIFT_EARLY_MIN, LATE_IN_1, LATE_IN_2, LATE_OUT_1, EARLY_OUT_BLOCK_MIN,
   punch, shiftToday, punchHistory, lateByUser, scheduledFor,
   myOffs, toggleOff, offSummary, setLock, isLocked, whoOff, MAX_OFF_PER_DAY_DEPT,
   LOCATIONS, LOCATION_TZ, tzOf, zonedToUtc, dayInTz, shiftWindow,
