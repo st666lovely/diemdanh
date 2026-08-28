@@ -300,6 +300,7 @@ app.get('/api/admin/board', requireUser, requireAdmin, (req, res) => {
     server_time: Date.now(),
     me: { name: req.user.name, role: req.user.role, brand: req.user.brand },
     scope: req.scope,
+    shifts: D.SHIFTS,
     lanes: D.lanes(req.scope),
     users: D.allUsers(req.scope, req.query.ym || null),
     staff_ym: req.query.ym || new Date().toISOString().slice(0, 7),
@@ -445,6 +446,7 @@ app.post('/api/admin/ot', requireUser, requireAdmin, (req, res) => {
 app.get('/api/admin/shift-log', requireUser, requireAdmin, (req, res) => {
   res.json({
     ...D.shiftLog(req.query, req.scope),
+    shifts: D.SHIFTS,
     users: D.allUsers(req.scope).filter((u) => u.role === 'staff'),
     departments: D.DEPTS,
     brands: req.scope ? [req.scope] : D.BRANDS,
@@ -607,6 +609,7 @@ app.get('/api/admin/rollcalls', requireUser, requireAdmin, (req, res) => {
   D.sweepRollCalls();
   res.json({
     ...D.rollCallReport(req.query, req.scope),
+    shifts: D.SHIFTS,
     upcoming: D.upcomingRollCalls(req.scope),
     server_time: Date.now(),
     users: D.allUsers(req.scope).filter((u) => u.role === 'staff'),
@@ -841,6 +844,7 @@ app.get('/api/late', requireUser, (req, res) => {
 
   res.json({
     detail,
+    shifts: D.SHIFTS,
     ...(detail
       ? D.punchHistory({ ...req.query, only_late: 1 }, req.user)
       : D.lateByUser(req.query, scope === null ? null : scope)),
