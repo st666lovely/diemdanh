@@ -201,7 +201,8 @@ function renderBoard() {
       <div class="f"><label>Hoạt động</label>${sel('type_code',
         B.types.map(t=>`<option value="${t.code}"${mark('type_code',t.code)}>${t.name}</option>`).join(''),'Tất cả')}</div>
       <div class="f"><label>Ca</label>${sel('shift',
-        (B.shifts||[]).map(c=>`<option value="${c.code}"${mark('shift',c.code)}>${c.name}</option>`).join(''),'Tất cả ca')}</div>
+        (B.shifts||[]).filter(c=>c.in_use!==false)
+          .map(c=>`<option value="${c.code}"${mark('shift',c.code)}>${c.name}</option>`).join(''),'Tất cả ca')}</div>
       <div class="f"><label>Bộ phận</label>${sel('department',
         B.departments.map(d=>`<option${mark('department',d)}>${d}</option>`).join(''),'Tất cả')}</div>
       <div class="f"><label>Khu vực</label>${sel('location',
@@ -1081,7 +1082,8 @@ function punchFilters(d, mode) {
       : `<div class="f"><label>Loại</label>${sel('kind',
           Object.entries(d.kinds).map(([k, v]) => `<option value="${k}"${mark('kind', k)}>${v}</option>`).join(''), 'Tất cả')}</div>`}
     <div class="f"><label>Ca</label>${sel('shift',
-      (d.shifts || []).map(c => `<option value="${c.code}"${mark('shift', c.code)}>${c.name}</option>`).join(''), 'Tất cả ca')}</div>
+      (d.shifts || []).filter(c => c.in_use !== false)
+        .map(c => `<option value="${c.code}"${mark('shift', c.code)}>${c.name}</option>`).join(''), 'Tất cả ca')}</div>
     <div class="f"><label>Bộ phận</label>${sel('department',
       d.departments.map(x => `<option${mark('department', x)}>${x}</option>`).join(''), 'Tất cả')}</div>
     <div class="f"><label>Khu vực</label>${sel('location',
