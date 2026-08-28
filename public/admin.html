@@ -67,6 +67,8 @@
 
 <script>
 const $ = s => document.querySelector(s);
+/* Ngày trên đồng hồ của một mốc thời gian, để so với ngày của ca */
+const isoDay = t => new Date(t).toLocaleDateString('en-CA');
 const pad = n => String(n).padStart(2, '0');
 const clk = s => (s < 0 ? '-' : '') + pad(Math.floor(Math.abs(s) / 60)) + ':' + pad(Math.abs(s) % 60);
 const dmy = t => pad(new Date(t).getDate()) + '/' + pad(new Date(t).getMonth() + 1) + '/' + new Date(t).getFullYear();
@@ -1098,10 +1100,11 @@ async function loadShiftLog() {
       <div class="u-tags"><span class="pill mono">${x.emp_code || '—'}</span>
         <span class="pill">${x.department || '—'}</span>
         ${x.brand ? `<span class="pill pri">${x.brand}</span>` : ''}</div></td>
-    <td>${dmy(x.in_at || x.out_at)}</td>
+    <td>${x.day.split('-').reverse().join('/')}
+      ${x.qua_dem ? '<div class="sub">ra sáng hôm sau</div>' : ''}</td>
     <td class="c mono">${gio(x.in_at)}</td>
     <td class="c">${x.in_at ? treBadge(x.in_late, x.in_late_min) : '<span class="sub">—</span>'}</td>
-    <td class="c mono">${x.out_at ? gio(x.out_at)
+    <td class="c mono">${x.out_at ? gio(x.out_at) + (x.qua_dem ? ' <span class="pill">+1</span>' : '')
       : x.in_progress ? '<span class="pill pri"><span class="dot"></span>đang trực</span>'
       : '<span class="pill red">quên bấm ra</span>'}</td>
     <td class="c">${x.out_at ? treBadge(x.out_late, x.out_late_min) : '<span class="sub">—</span>'}</td>
@@ -1200,7 +1203,9 @@ async function lateDetail(userId, name) {
 
   const rows = d.rows || [];
   const trs = rows.map(r => `<tr>
-    <td>${dmy(r.actual_at)}</td>
+    <td>${dmy(r.actual_at)}
+      ${r.shift_day && r.shift_day !== isoDay(r.actual_at)
+        ? `<div class="sub">ca ${r.shift_day.split('-').reverse().slice(0,2).join('/')}</div>` : ''}</td>
     <td class="mono">${hms(r.actual_at)}</td>
     <td><span class="pill ${KIND_PILL[r.kind] || ''}">${r.kind_label}</span></td>
     <td class="sub mono">${r.scheduled_at ? hms(r.scheduled_at) : '—'}</td>
