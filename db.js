@@ -1230,8 +1230,17 @@ function applySchedule(parsed, mode = 'merge', scope = null) {
     // Cột "Ma" trong file thực tế là MÃ NHÂN VIÊN (ST666-770), không phải mã link.
     // Thử cả ba cách khớp: mã link 8 ký tự, mã nhân viên, rồi tên.
     const mã = (r.emp_code || r.key || '').trim().toUpperCase();
-    let u = (mã && byKey.get(mã)) || (mã && byEmp.get(mã))
-         || (r.name && byName.get(r.name)) || null;
+
+    // Thứ tự khớp: mã link 8 ký tự -> TÊN -> mã nhân viên.
+    // Tên đứng trước mã NV vì file có thể điền trùng mã cho hai người khác nhau;
+    // lúc đó khớp theo mã sẽ ghi đè lịch của người kia.
+    let u = (mã && byKey.get(mã)) || (r.name && byName.get(r.name)) || null;
+
+    if (!u && mã) {
+      const theoMaNV = byEmp.get(mã);
+      // Chỉ nhận khi tên khớp, hoặc file không ghi tên
+      if (theoMaNV && (!r.name || theoMaNV.name === r.name)) u = theoMaNV;
+    }
     if (!u) {
       if (!r.name) { skipped.push(r.key || '(dòng không có tên)'); return null; }
 
@@ -1256,18 +1265,53 @@ function applySchedule(parsed, mode = 'merge', scope = null) {
 
       // Mã NV lấy từ file nếu chưa ai dùng, không thì để trống rồi hệ thống tự sinh
       let empCode = mã || null;
-      if (empCode && byEmp.get(empCode)) empCode = null;
+      if (empCode && byEmp.get(empCode)) {
+        canhBao.push(`${r.name}: Mã NV "${empCode}" đã thuộc về người khác, `
+          + `đã tạo mới không kèm mã. Sửa lại ở tab Nhân sự.`);
+        empCode = null;
+      }
 
-      const info = insUser.run(r.name, newKey(), empCode, dep, br, loc, now());
-      u = { id: info.lastInsertRowid, name: r.name, brand: br,
-            department: dep, location: loc, emp_code: empCode };
-      created.push(r.name);
+      // Một dòng hỏng không được làm sập cả lần nhập
+      try {
+        const info = insUser.run(r.name, newKey(), empCode, dep, br, loc, now());
+        u = { id: info.lastInsertRowid, name: r.name, brand: br,
+              department: dep, location: loc, emp_code: empCode };
+        created.push(r.name);
+      } catch (e) {
+        // Mã NV trùng ngay trong cùng file, hoặc lỗi ghi khác
+        try {
+          const info = insUser.run(r.name, newKey(), null, dep, br, loc, now());
+          u = { id: info.lastInsertRowid, name: r.name, brand: br,
+                department: dep, location: loc, emp_code: null };
+          created.push(r.name);
+          canhBao.push(`${r.name}: không gán được Mã NV "${mã}" `
+            + `(có thể trùng với dòng khác trong file). Đã tạo người, cần đặt mã sau.`);
+        } catch (e2) {
+          canhBao.push(`${r.name}: không tạo được nhân viên — ${e2.message}`);
+          return null;
+        }
+      }
     }
     // Admin của brand này không được đụng vào người của brand kia
     if (!inScope(scope, u.brand)) { outside.push(u.name); return null; }
     matched.push(u.name);
     return { user: u, rec: r };
   };
+
+  // Cảnh báo sớm: cùng một Mã NV mà hai tên khác nhau trong cùng file
+  const theoMa = new Map();
+  for (const r of rows) {
+    const m = (r.emp_code || '').trim().toUpperCase();
+    if (!m) continue;
+    if (!theoMa.has(m)) theoMa.set(m, new Set());
+    theoMa.get(m).add(r.name || '(không tên)');
+  }
+  for (const [m, tens] of theoMa) {
+    if (tens.size > 1) {
+      canhBao.push(`Mã NV "${m}" bị dùng cho ${tens.size} người: ${[...tens].join(', ')}. `
+        + 'Mỗi người phải có mã riêng — sửa file rồi nhập lại.');
+    }
+  }
 
   const delMonth = db.prepare("DELETE FROM shift_days WHERE day LIKE ?");
   const delUser = db.prepare("DELETE FROM shift_days WHERE user_id=? AND day LIKE ?");
@@ -1311,7 +1355,12 @@ function applySchedule(parsed, mode = 'merge', scope = null) {
       const mãFile = (rec.emp_code || '').trim().toUpperCase();
       if (mãFile && !user.emp_code) {
         const trùng = db.prepare('SELECT 1 FROM users WHERE emp_code=? AND id<>?').get(mãFile, user.id);
-        if (!trùng) db.prepare('UPDATE users SET emp_code=? WHERE id=?').run(mãFile, user.id);
+        if (trùng) {
+          canhBao.push(`${user.name}: Mã NV "${mãFile}" đang thuộc về người khác, chưa gán được.`);
+        } else {
+          try { db.prepare('UPDATE users SET emp_code=? WHERE id=?').run(mãFile, user.id); }
+          catch (e) { canhBao.push(`${user.name}: không gán được Mã NV "${mãFile}" — ${e.message}`); }
+        }
       }
 
       // Mã cá nhân đi kèm trong file: băm rồi lưu, số gốc không giữ lại đâu cả
