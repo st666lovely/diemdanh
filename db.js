@@ -731,7 +731,7 @@ function punchHistory(f = {}, viewer = null) {
 
   const where = w.length ? 'WHERE ' + w.join(' AND ') : '';
   const rows = db.prepare(
-    `SELECT p.*, u.name user_name FROM punches p JOIN users u ON u.id=p.user_id
+    `SELECT p.*, u.name user_name, u.location FROM punches p JOIN users u ON u.id=p.user_id
      ${where} ORDER BY p.actual_at DESC LIMIT ?`).all(...p, Math.min(+f.limit || 300, 100000));
 
   const s = db.prepare(
@@ -754,6 +754,8 @@ function punchHistory(f = {}, viewer = null) {
       late_label: r.late_level ? LATE_LEVELS[r.late_level].label : null, ip: r.ip,
       photo_id: r.photo_path ? r.id : null,
       screen_id: r.screen_path ? r.id : null,
+      // Ca đêm: lượt bấm 09:00 sáng vẫn thuộc ca hôm trước
+      shift_day: shiftDayOf(r.user_id, r.actual_at, tzOf(r.location || 'VN')),
     })),
     stats: {
       total: s.total || 0, in5: s.a || 0, in30: s.b || 0, out60: s.c || 0,
@@ -765,6 +767,33 @@ function punchHistory(f = {}, viewer = null) {
 
 /* Nhật ký VÀO/RA CA — gộp cặp lên ca + xuống ca của cùng một ngày một người.
    Đây là thứ quản lý cần khi hỏi "hôm qua ai vào lúc mấy giờ, ra lúc mấy giờ". */
+/* Một lần bấm thuộc CA của ngày nào.
+   Ca đêm 23:00-09:00 thì lần bấm lúc 09:05 sáng hôm sau vẫn thuộc ca hôm trước.
+   Trước đây gộp theo ngày trên đồng hồ nên một ca bị tách làm hai dòng. */
+function shiftDayOf(userId, at, tz) {
+  const homNay = dayInTz(at, tz);
+  const homQua = addDays(homNay, -1);
+
+  const lay = db.prepare('SELECT * FROM shift_days WHERE user_id=? AND day=?');
+  const otLay = db.prepare('SELECT hours FROM ot_records WHERE user_id=? AND day=?');
+
+  // Xét ngày hôm qua trước: chỉ ca hôm qua mới có thể tràn sang hôm nay
+  for (const d of [homQua, homNay]) {
+    const row = lay.get(userId, d);
+    if (!row) continue;
+
+    const start = zonedToUtc(d, row.start_hm, tz).getTime();
+    let end = zonedToUtc(d, row.end_hm, tz).getTime();
+    if (end <= start) end += 24 * 3600000;              // ca qua đêm
+    const ot = otLay.get(userId, d);
+    if (ot) end += ot.hours * 3600000;
+
+    // Nới hai đầu 2 tiếng để bắt cả lượt bấm sớm và bấm muộn
+    if (at >= start - 2 * 3600000 && at <= end + 2 * 3600000) return d;
+  }
+  return homNay;                                        // không có ca thì lấy ngày trên đồng hồ
+}
+
 function shiftLog(f = {}, scope = null) {
   const w = [], p = [];
   if (scope !== null) { w.push('p.brand=?');       p.push(scope); }
@@ -781,11 +810,12 @@ function shiftLog(f = {}, scope = null) {
      FROM punches p JOIN users u ON u.id=p.user_id
      WHERE ${w.join(' AND ')} ORDER BY p.actual_at DESC LIMIT 2000`).all(...p);
 
-  // Gộp theo người + ngày (theo giờ địa phương của người đó)
+  // Gộp theo người + NGÀY CỦA CA, không phải ngày trên đồng hồ.
+  // Nhờ vậy ca đêm 23:00-09:00 nằm gọn trên một dòng.
   const byKey = new Map();
   for (const r of rows) {
     const tz = tzOf(r.location || 'VN');
-    const day = dayInTz(r.actual_at, tz);
+    const day = shiftDayOf(r.user_id, r.actual_at, tz);
     const k = `${r.user_id}|${day}`;
     if (!byKey.has(k)) {
       byKey.set(k, {
@@ -819,6 +849,7 @@ function shiftLog(f = {}, scope = null) {
     const ot = (otOf(o.user_id, o.day) || {}).hours || 0;
 
     // Ca hôm đó kết thúc lúc nào — để phân biệt "đang trong ca" với "quên bấm ra"
+    const tz0 = tzOf((userRow.get(o.user_id) || {}).location);
     let endAt = null;
     const sr = shiftRow.get(o.user_id, o.day);
     if (sr) {
@@ -833,8 +864,12 @@ function shiftLog(f = {}, scope = null) {
     // Chưa hết ca thì là ĐANG TRỰC, không phải quên. Cho thêm 30 phút ân hạn.
     const inProgress = chuaRa && (endAt === null ? true : t < endAt + 30 * 60000);
 
+    // Giờ ra rơi sang ngày hôm sau -> đánh dấu để bảng hiện "+1"
+    const quaDem = !!(o.in_at && o.out_at
+      && dayInTz(o.in_at, tz0) !== dayInTz(o.out_at, tz0));
+
     return {
-      ...o, ot, shift_end_at: endAt,
+      ...o, ot, shift_end_at: endAt, qua_dem: quaDem,
       in_progress: inProgress,
       duration_min: o.in_at && o.out_at ? Math.round((o.out_at - o.in_at) / 60000)
                   : (inProgress ? Math.round((t - o.in_at) / 60000) : null),
@@ -1855,7 +1890,7 @@ module.exports = {
   reportDepts, setReportDepts, getSetting, setSetting,
   REPORT_GRACE_MIN, REPORT_BLOCK_AFTER, REPORT_ALERT_AFTER,
   sweepRollCalls, releaseMakeups, activeRollCall, answerRollCall, rollCallReport, upcomingRollCalls, fireRollCall, deferRollCall,
-  rollCallByDay, activityByDay, shiftLog,
+  rollCallByDay, activityByDay, shiftLog, shiftDayOf,
   RC_PER_SHIFT, RC_WINDOW_MIN, RC_MAKEUP_MIN,
   applySchedule, checkScheduleRows, scheduleOf, scheduleSummary,
 };
