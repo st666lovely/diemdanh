@@ -1,6 +1,6 @@
 # Trạm trực
 
-Quản lý ca trực và hoạt động rời vị trí cho các bộ phận CS / CS ONL / VIP / RISK / RISK ONL,
+Quản lý ca trực và hoạt động rời vị trí cho các bộ phận
 tách riêng theo brand AE và ST.
 
 ## Vào ca — nhân viên KHÔNG cần đăng nhập
