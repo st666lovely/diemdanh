@@ -206,7 +206,9 @@ function parseScheduleFile(buffer, ym, hoursOf = () => 8) {
       }
       if (!emp && !name) continue;                 // dòng trống hoặc dòng phân cách
 
-      const key = (emp || name).toUpperCase();
+      // Gộp theo TÊN nếu có tên, vì hai người khác nhau có thể bị điền trùng Mã NV.
+      // Trước đây gộp theo mã nên người thứ hai lặng lẽ biến mất khỏi file.
+      const key = (name || emp).toUpperCase();
       if (!byPerson.has(key)) {
         byPerson.set(key, {
           key: emp ? emp.toUpperCase() : '', name, emp_code: emp,
