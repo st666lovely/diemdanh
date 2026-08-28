@@ -432,8 +432,11 @@ function history(f = {}, scope = null) {
   if (f.brand)      { w.push('a.brand=?');      p.push(f.brand); }
   if (f.department) { w.push('a.department=?'); p.push(f.department); }
   if (f.location)   { w.push('u.location=?');   p.push(f.location); }
-  if (f.from)       { w.push('a.started_at>=?'); p.push(new Date(f.from + 'T00:00:00').getTime()); }
-  if (f.to)         { w.push('a.started_at<=?'); p.push(new Date(f.to + 'T23:59:59').getTime()); }
+  /* Lọc ngày áp lên NGÀY CỦA CA. Ca đêm 27/08 kéo tới 02:00 ngày 28, nên lượt
+     rời vị trí lúc 01:30 vẫn thuộc ca 27. Nới truy vấn hai đầu rồi cắt lại ở dưới. */
+  const NOI_HD = 36 * 3600000;
+  if (f.from) { w.push('a.started_at>=?'); p.push(new Date(f.from + 'T00:00:00').getTime() - NOI_HD); }
+  if (f.to)   { w.push('a.started_at<=?'); p.push(new Date(f.to + 'T23:59:59').getTime() + NOI_HD); }
   if (f.only === 'over')    w.push('a.is_over_limit=1');
   if (f.only === 'forgot')  w.push("a.closed_by='auto'");
   if (f.only === 'running') w.push('a.ended_at IS NULL');
@@ -446,22 +449,32 @@ function history(f = {}, scope = null) {
   const limit = Math.min(+f.limit || 200, 100000);
 
   const rows = db.prepare(
-    `SELECT a.*, u.name user_name FROM activities a JOIN users u ON u.id=a.user_id
+    `SELECT a.*, u.name user_name, u.location FROM activities a JOIN users u ON u.id=a.user_id
      ${where} ORDER BY a.started_at DESC LIMIT ?`).all(...p, limit);
 
-  const s = db.prepare(
-    `SELECT COUNT(*) total,
-            SUM(CASE WHEN a.is_over_limit=1 THEN 1 ELSE 0 END) ov,
-            SUM(CASE WHEN a.closed_by='auto' THEN 1 ELSE 0 END) fg,
-            SUM(CASE WHEN a.ended_at IS NULL THEN 1 ELSE 0 END) rn
-     FROM activities a JOIN users u ON u.id=a.user_id ${where}`).get(...p);
+  // Gán ngày ca cho từng lượt rồi cắt theo khoảng người dùng chọn
+  const coNgay = rows.map((r) => ({
+    ...r, shift_day: shiftDayOf(r.user_id, r.started_at, tzOf(r.location || 'VN')),
+  }));
+  const trongKhoang = coNgay.filter((r) =>
+    (!f.from || r.shift_day >= f.from) && (!f.to || r.shift_day <= f.to));
 
   return {
-    rows: rows.map((r) => ({
+    rows: trongKhoang.map((r) => ({
       ...present(r), ended_at: r.ended_at, duration_sec: r.duration_sec,
       is_over_limit: !!r.is_over_limit, closed_by: r.closed_by, ip: r.ip,
+      shift_day: r.shift_day,
+      // Bắt đầu một ngày, kết thúc sang ngày khác
+      qua_dem: !!(r.ended_at
+        && dayInTz(r.started_at, tzOf(r.location || 'VN'))
+           !== dayInTz(r.ended_at, tzOf(r.location || 'VN'))),
     })),
-    stats: { total: s.total || 0, over: s.ov || 0, forgot: s.fg || 0, running: s.rn || 0 },
+    stats: {
+      total: trongKhoang.length,
+      over: trongKhoang.filter((r) => r.is_over_limit).length,
+      forgot: trongKhoang.filter((r) => r.closed_by === 'auto').length,
+      running: trongKhoang.filter((r) => !r.ended_at).length,
+    },
   };
 }
 
@@ -801,8 +814,13 @@ function shiftLog(f = {}, scope = null) {
   if (f.department)   { w.push('p.department=?');  p.push(f.department); }
   if (f.brand)        { w.push('p.brand=?');       p.push(f.brand); }
   if (f.location)     { w.push('u.location=?');    p.push(f.location); }
-  if (f.from)         { w.push('p.actual_at>=?');  p.push(new Date(f.from + 'T00:00:00').getTime()); }
-  if (f.to)           { w.push('p.actual_at<=?');  p.push(new Date(f.to + 'T23:59:59').getTime()); }
+  /* Lọc ngày phải áp lên NGÀY CỦA CA, không phải thời điểm bấm.
+     Ca đêm 27/08 có lượt vào 18:00 ngày 27 và lượt ra 02:08 ngày 28 — lọc thẳng
+     theo thời điểm sẽ cắt mất một nửa, để lại dòng thiếu giờ vào.
+     Nên nới truy vấn ra hai đầu 1 ngày rồi lọc lại theo ngày ca ở dưới. */
+  const NOI = 36 * 3600000;
+  if (f.from) { w.push('p.actual_at>=?'); p.push(new Date(f.from + 'T00:00:00').getTime() - NOI); }
+  if (f.to)   { w.push('p.actual_at<=?'); p.push(new Date(f.to + 'T23:59:59').getTime() + NOI); }
   w.push("p.kind IN ('in','out')");
 
   const rows = db.prepare(
@@ -875,17 +893,21 @@ function shiftLog(f = {}, scope = null) {
                   : (inProgress ? Math.round((t - o.in_at) / 60000) : null),
       missing_out: chuaRa && !inProgress,
     };
-  }).sort((a, b) => (b.in_at || 0) - (a.in_at || 0));
+  }).sort((a, b) => (b.in_at || b.out_at || 0) - (a.in_at || a.out_at || 0));
+
+  // Giờ mới cắt theo ngày ca — lúc này mỗi ca đã gộp đủ hai đầu
+  const trongKhoang = list.filter((x) =>
+    (!f.from || x.day >= f.from) && (!f.to || x.day <= f.to));
 
   return {
-    rows: list,
+    rows: trongKhoang,
     stats: {
-      total: list.length,
-      late_in: list.filter((x) => x.in_late).length,
-      late_out: list.filter((x) => x.out_late).length,
-      missing_out: list.filter((x) => x.missing_out).length,
-      in_progress: list.filter((x) => x.in_progress).length,
-      ot_days: list.filter((x) => x.ot > 0).length,
+      total: trongKhoang.length,
+      late_in: trongKhoang.filter((x) => x.in_late).length,
+      late_out: trongKhoang.filter((x) => x.out_late).length,
+      missing_out: trongKhoang.filter((x) => x.missing_out).length,
+      in_progress: trongKhoang.filter((x) => x.in_progress).length,
+      ot_days: trongKhoang.filter((x) => x.ot > 0).length,
     },
   };
 }
@@ -921,36 +943,51 @@ function rollCallByDay(userId, f = {}) {
 
 /* Chi tiết hoạt động rời vị trí theo NGÀY của một người — cho nút "Xem lượt" ở tab Theo dõi */
 function activityByDay(userId, f = {}) {
+  const u = db.prepare('SELECT location FROM users WHERE id=?').get(userId) || {};
+  const tz = tzOf(u.location);
+
+  // Lấy rộng rồi gán ngày ca, để lượt rời vị trí lúc rạng sáng thuộc đúng ca hôm trước
   const w = ['a.user_id=?'], p = [userId];
-  if (f.from) { w.push("date(a.started_at/1000,'unixepoch','+7 hours')>=?"); p.push(f.from); }
-  if (f.to)   { w.push("date(a.started_at/1000,'unixepoch','+7 hours')<=?"); p.push(f.to); }
+  const NOI = 36 * 3600000;
+  if (f.from) { w.push('a.started_at>=?'); p.push(new Date(f.from + 'T00:00:00').getTime() - NOI); }
+  if (f.to)   { w.push('a.started_at<=?'); p.push(new Date(f.to + 'T23:59:59').getTime() + NOI); }
 
-  const rows = db.prepare(
-    `SELECT date(a.started_at/1000,'unixepoch','+7 hours') ngay,
-            COUNT(*) so_luot,
-            SUM(IFNULL(a.duration_sec,0)) tong_giay,
-            SUM(CASE WHEN a.is_over_limit=1 THEN 1 ELSE 0 END) qua_gio,
-            SUM(CASE WHEN a.closed_by='auto' THEN 1 ELSE 0 END) quen_bam,
-            SUM(CASE WHEN a.is_over_limit=1
-                THEN MAX(0, IFNULL(a.duration_sec,0) - a.limit_minutes*60) ELSE 0 END) giay_lo
-     FROM activities a WHERE ${w.join(' AND ')}
-     GROUP BY ngay ORDER BY ngay DESC LIMIT 60`).all(...p);
+  const raw = db.prepare(
+    `SELECT a.* FROM activities a WHERE ${w.join(' AND ')}
+     ORDER BY a.started_at DESC LIMIT 600`).all(...p);
 
-  const items = db.prepare(
-    `SELECT a.*, date(a.started_at/1000,'unixepoch','+7 hours') ngay
-     FROM activities a WHERE ${w.join(' AND ')}
-     ORDER BY a.started_at DESC LIMIT 300`).all(...p);
+  const coNgay = raw
+    .map((a) => ({ ...a, ngay: shiftDayOf(userId, a.started_at, tz) }))
+    .filter((a) => (!f.from || a.ngay >= f.from) && (!f.to || a.ngay <= f.to));
+
+  // Gộp theo ngày ca
+  const gop = new Map();
+  for (const a of coNgay) {
+    if (!gop.has(a.ngay)) {
+      gop.set(a.ngay, { ngay: a.ngay, so_luot: 0, tong_giay: 0, qua_gio: 0, quen_bam: 0, giay_lo: 0 });
+    }
+    const g = gop.get(a.ngay);
+    g.so_luot++;
+    g.tong_giay += a.duration_sec || 0;
+    if (a.is_over_limit) {
+      g.qua_gio++;
+      g.giay_lo += Math.max(0, (a.duration_sec || 0) - a.limit_minutes * 60);
+    }
+    if (a.closed_by === 'auto') g.quen_bam++;
+  }
 
   return {
-    byDay: rows.map((r) => ({
-      ...r,
-      tong_phut: Math.round(r.tong_giay / 60),
-      phut_lo: Math.round(r.giay_lo / 60),
-    })),
-    items: items.map((a) => ({
+    byDay: [...gop.values()]
+      .sort((x, y) => (x.ngay < y.ngay ? 1 : -1))
+      .slice(0, 60)
+      .map((r) => ({ ...r,
+        tong_phut: Math.round(r.tong_giay / 60),
+        phut_lo: Math.round(r.giay_lo / 60) })),
+    items: coNgay.slice(0, 300).map((a) => ({
       ...present({ ...a, user_name: null }),
       ngay: a.ngay, ended_at: a.ended_at, duration_sec: a.duration_sec,
       is_over_limit: !!a.is_over_limit, closed_by: a.closed_by,
+      qua_dem: !!(a.ended_at && dayInTz(a.started_at, tz) !== dayInTz(a.ended_at, tz)),
       over_sec: a.is_over_limit ? Math.max(0, (a.duration_sec || 0) - a.limit_minutes * 60) : 0,
     })),
   };
