@@ -431,6 +431,7 @@ function history(f = {}, scope = null) {
   if (f.type_code)  { w.push('a.type_code=?');  p.push(f.type_code); }
   if (f.brand)      { w.push('a.brand=?');      p.push(f.brand); }
   if (f.department) { w.push('a.department=?'); p.push(f.department); }
+  if (f.location)   { w.push('u.location=?');   p.push(f.location); }
   if (f.from)       { w.push('a.started_at>=?'); p.push(new Date(f.from + 'T00:00:00').getTime()); }
   if (f.to)         { w.push('a.started_at<=?'); p.push(new Date(f.to + 'T23:59:59').getTime()); }
   if (f.only === 'over')   w.push('a.is_over_limit=1');
@@ -448,7 +449,7 @@ function history(f = {}, scope = null) {
             SUM(CASE WHEN a.is_over_limit=1 THEN 1 ELSE 0 END) ov,
             SUM(CASE WHEN a.closed_by='auto' THEN 1 ELSE 0 END) fg,
             SUM(CASE WHEN a.ended_at IS NULL THEN 1 ELSE 0 END) rn
-     FROM activities a ${where}`).get(...p);
+     FROM activities a JOIN users u ON u.id=a.user_id ${where}`).get(...p);
 
   return {
     rows: rows.map((r) => ({
@@ -716,6 +717,7 @@ function punchHistory(f = {}, viewer = null) {
   }
   if (f.kind)       { w.push('p.kind=?');       p.push(f.kind); }
   if (f.department) { w.push('p.department=?'); p.push(f.department); }
+  if (f.location)   { w.push('u.location=?');   p.push(f.location); }
   if (f.brand)      { w.push('p.brand=?');      p.push(f.brand); }
   if (f.from)       { w.push('p.actual_at>=?'); p.push(new Date(f.from + 'T00:00:00').getTime()); }
   if (f.to)         { w.push('p.actual_at<=?'); p.push(new Date(f.to + 'T23:59:59').getTime()); }
@@ -764,6 +766,7 @@ function shiftLog(f = {}, scope = null) {
   if (f.user_id)      { w.push('p.user_id=?');     p.push(f.user_id); }
   if (f.department)   { w.push('p.department=?');  p.push(f.department); }
   if (f.brand)        { w.push('p.brand=?');       p.push(f.brand); }
+  if (f.location)     { w.push('u.location=?');    p.push(f.location); }
   if (f.from)         { w.push('p.actual_at>=?');  p.push(new Date(f.from + 'T00:00:00').getTime()); }
   if (f.to)           { w.push('p.actual_at<=?');  p.push(new Date(f.to + 'T23:59:59').getTime()); }
   w.push("p.kind IN ('in','out')");
@@ -919,6 +922,7 @@ function lateByUser(f = {}, scope = null) {
   if (f.user_id)       { w.push('p.user_id=?');     p.push(f.user_id); }
   if (f.department)    { w.push('p.department=?');  p.push(f.department); }
   if (f.brand)         { w.push('p.brand=?');       p.push(f.brand); }
+  if (f.location)      { w.push('u.location=?');    p.push(f.location); }
   if (f.late_level)    { w.push('p.late_level=?');  p.push(f.late_level); }
   if (f.from)          { w.push('p.actual_at>=?');  p.push(new Date(f.from + 'T00:00:00').getTime()); }
   if (f.to)            { w.push('p.actual_at<=?');  p.push(new Date(f.to + 'T23:59:59').getTime()); }
@@ -1561,6 +1565,7 @@ function rollCallReport(f = {}, scope = null) {
   if (f.user_id)      { w.push("r.user_id=?"); p.push(f.user_id); }
   if (f.department)   { w.push("r.department=?"); p.push(f.department); }
   if (f.brand)        { w.push("r.brand=?"); p.push(f.brand); }
+  if (f.location)     { w.push("u.location=?"); p.push(f.location); }
   if (f.from)         { w.push("r.day>=?"); p.push(f.from); }
   if (f.to)           { w.push("r.day<=?"); p.push(f.to); }
   const where = w.length ? "WHERE " + w.join(" AND ") : "";
