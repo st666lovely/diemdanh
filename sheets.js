@@ -146,7 +146,10 @@ async function fetchOne(sh, force = false) {
   let _cache;
   try {
     const res = await client().spreadsheets.values.get({
-      spreadsheetId: sh.id, range: `${sh.tab}!A1:Z5000`,
+      /* Truyền TÊN TAB không kèm khoảng dòng -> Google trả về toàn bộ vùng có dữ liệu.
+         Trước đây giới hạn cứng A1:Z5000, nên khi file duyệt rút vượt 5000 dòng thì
+         các dòng MỚI NHẤT bị cắt — nhân viên điền xong mà hệ thống vẫn báo chưa thấy. */
+      spreadsheetId: sh.id, range: sh.tab,
       valueRenderOption: 'UNFORMATTED_VALUE',
       dateTimeRenderOption: 'SERIAL_NUMBER',
     });
@@ -199,7 +202,11 @@ async function fetchOne(sh, force = false) {
       });
     }
 
-    _cache = { at: Date.now(), rows, headers, error: null, name: sh.name, tab: sh.tab, id: sh.id };
+    const canhBao = grid.length >= 40000
+      ? `File đã ${grid.length} dòng — nên tách bớt sang file mới cho nhẹ.` : null;
+
+    _cache = { at: Date.now(), rows, headers, error: null, warn: canhBao,
+               grid_rows: grid.length, name: sh.name, tab: sh.tab, id: sh.id };
     _caches.set(sh.id, _cache);
     return _cache;
 
@@ -270,6 +277,8 @@ function status() {
     return {
       name: sh.name, tab: sh.tab, id_short: sh.id.slice(0, 8) + '…',
       rows: c ? c.rows.length : 0,
+      grid_rows: c ? (c.grid_rows || 0) : 0,
+      warn: c ? c.warn : null,
       error: c ? c.error : 'Chưa đọc lần nào',
       fetched_at: c ? c.at : null,
     };
