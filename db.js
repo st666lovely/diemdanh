@@ -1758,16 +1758,51 @@ function cancelPendingRollCalls(userId) {
 }
 
 function planRollCalls(user, day, startUtc, endUtc) {
-  /* Chỉ đếm lượt CÒN HIỆU LỰC. Lượt đã huỷ vì xuống ca không được chặn việc
-     sinh lịch mới — nếu không, người xuống ca rồi lên lại sẽ không bị điểm danh
-     lần nào nữa trong ngày. */
-  const existed = db.prepare(
-    "SELECT COUNT(*) n FROM roll_calls WHERE user_id=? AND day=? AND is_makeup=0 " +
-    "AND status <> 'cancelled'"
-  ).get(user.id, day).n;
-  if (existed > 0) return 0;
-
   const t = now();
+
+  /* Một người có thể Xuống ca rồi Lên ca lại trong CÙNG một ca.
+     Khi Xuống ca, các lượt tương lai của phiên trước bị huỷ để không tính vắng.
+     Khi Lên ca lại, phải sinh một lịch MỚI cho phần thời gian còn lại.
+
+     Cách cũ chỉ cần thấy bất kỳ lượt non-cancelled nào trong ngày (ví dụ một lượt
+     "Đã điểm danh" trước lúc xuống ca) là chặn sinh lịch mới. Hậu quả: sau khi
+     lên ca lại, bảng chỉ còn các lượt "Đã huỷ — Đã xuống ca" và không có lượt mới.
+
+     Cách mới:
+     - Lần vào ca đầu tiên: giữ cơ chế cũ, tránh sinh trùng lịch đã lên sẵn.
+     - Từ lần vào ca thứ 2 trở đi trong cùng khung ca: chỉ kiểm tra xem đã có
+       một batch AUTO nào được tạo SAU lần "Lên ca" mới nhất chưa.
+       Nếu chưa -> sinh lại đúng một batch cho phần ca còn lại.
+       Nếu rồi -> không sinh thêm ở các vòng quét tiếp theo. */
+
+  const inPunches = db.prepare(
+    `SELECT actual_at FROM punches
+     WHERE user_id=? AND kind='in'
+       AND actual_at BETWEEN ? AND ?
+     ORDER BY actual_at`
+  ).all(user.id, startUtc - 2 * 3600000, t);
+
+  const latestIn = inPunches.length ? inPunches[inPunches.length - 1].actual_at : null;
+  const isReentry = inPunches.length >= 2;
+
+  if (isReentry && latestIn) {
+    const plannedAfterLatestIn = db.prepare(
+      `SELECT COUNT(*) n FROM roll_calls
+       WHERE user_id=? AND day=? AND is_makeup=0
+         AND source='auto' AND created_at>=?`
+    ).get(user.id, day, latestIn).n;
+
+    if (plannedAfterLatestIn > 0) return 0;
+  } else {
+    // Ca chưa vào hoặc lần vào đầu: nếu đã có lịch còn hiệu lực thì không sinh trùng.
+    const existed = db.prepare(
+      `SELECT COUNT(*) n FROM roll_calls
+       WHERE user_id=? AND day=? AND is_makeup=0
+         AND source='auto' AND status <> 'cancelled'`
+    ).get(user.id, day).n;
+
+    if (existed > 0) return 0;
+  }
   const pad = 20 * 60000, minGap = 25 * 60000;
   // Sinh lại giữa ca thì chỉ rải trong phần thời gian còn lại
   const from = Math.max(startUtc + pad, t + 60000);
