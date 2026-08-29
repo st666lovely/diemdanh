@@ -1596,6 +1596,69 @@ function savePhoto(userId, tag, dataUrl) {
   return { ok: true, path: `${userId}/${file}` };
 }
 
+/* ============================================================
+   DỌN ẢNH CŨ
+   Ảnh chỉ có giá trị lúc đối chiếu. Giữ quá lâu thì vừa đầy ổ vừa thành
+   kho dữ liệu nhạy cảm không ai dùng tới. Mặc định giữ 90 ngày.
+   ============================================================ */
+const PHOTO_KEEP_DAYS = Math.max(7, Number(process.env.PHOTO_KEEP_DAYS) || 90);
+
+function donAnhCu(soNgay = PHOTO_KEEP_DAYS) {
+  const moc = now() - soNgay * 86400000;
+  let xoa = 0, byte = 0, loi = 0;
+
+  if (!fs.existsSync(PHOTOS_DIR)) return { xoa, byte, loi, keep_days: soNgay };
+
+  for (const thuMuc of fs.readdirSync(PHOTOS_DIR)) {
+    const dir = path.join(PHOTOS_DIR, thuMuc);
+    let files;
+    try {
+      if (!fs.statSync(dir).isDirectory()) continue;
+      files = fs.readdirSync(dir);
+    } catch (e) { continue; }
+
+    for (const f of files) {
+      const abs = path.join(dir, f);
+      try {
+        const st = fs.statSync(abs);
+        if (st.mtimeMs >= moc) continue;
+        byte += st.size;
+        fs.rmSync(abs, { force: true });
+        xoa++;
+      } catch (e) { loi++; }
+    }
+
+    // Thư mục rỗng thì dọn luôn
+    try { if (!fs.readdirSync(dir).length) fs.rmdirSync(dir); } catch (e) {}
+  }
+
+  // Gỡ đường dẫn trong database để giao diện không hiện nút xem ảnh chết
+  if (xoa) {
+    const ngayMoc = new Date(moc).toISOString().slice(0, 10);
+    db.prepare('UPDATE punches SET photo_path=NULL, screen_path=NULL WHERE actual_at < ?').run(moc);
+    db.prepare('UPDATE roll_calls SET photo_path=NULL, screen_path=NULL WHERE day < ?').run(ngayMoc);
+    db.prepare('UPDATE activities SET screen_path=NULL WHERE started_at < ?').run(moc);
+  }
+
+  return { xoa, byte, loi, keep_days: soNgay };
+}
+
+/* Dung lượng ảnh đang chiếm, để quản trị biết khi nào cần siết */
+function dungLuongAnh() {
+  let files = 0, byte = 0;
+  if (!fs.existsSync(PHOTOS_DIR)) return { files, byte, mb: 0 };
+  for (const thuMuc of fs.readdirSync(PHOTOS_DIR)) {
+    const dir = path.join(PHOTOS_DIR, thuMuc);
+    try {
+      if (!fs.statSync(dir).isDirectory()) continue;
+      for (const f of fs.readdirSync(dir)) {
+        try { byte += fs.statSync(path.join(dir, f)).size; files++; } catch (e) {}
+      }
+    } catch (e) {}
+  }
+  return { files, byte, mb: Math.round(byte / 1048576 * 10) / 10 };
+}
+
 function photoAbsPath(relPath) {
   if (!relPath) return null;
   const p = path.join(PHOTOS_DIR, relPath);
@@ -1652,9 +1715,32 @@ const RC_MAKEUP_MIN  = Math.max(1, Number(process.env.ROLL_CALL_MAKEUP_MIN) || 3
 /* Sinh lịch điểm danh cho một ca: N mốc ngẫu nhiên, cách đầu và cuối ca 20 phút,
    và cách nhau tối thiểu 25 phút để không dồn cục. */
 /* Đã xuống ca hôm nay chưa */
+/* Đã xuống ca hay chưa — xét TRONG KHUNG CA ĐANG CHẠY, không xét theo ngày lịch.
+
+   Cách cũ nhìn mọi lượt bấm trong 12 tiếng gần nhất, nên lượt "xuống ca" của ca
+   hôm trước bị tính nhầm sang ca hôm nay. Hậu quả: người đang trực bị coi là đã
+   xuống ca, mọi lượt điểm danh bị huỷ với lý do "Đã xuống ca". */
 function hasCheckedOut(user) {
-  const st = shiftToday(user);
-  return !!(st.checked_out_at && (!st.checked_in_at || st.checked_out_at > st.checked_in_at));
+  const t = now();
+  const w = shiftWindow(user, t).filter((c) => t >= c.start && t <= c.end);
+
+  // Ngoài giờ ca thì coi như không còn trực
+  if (!w.length) return true;
+
+  const ca = w[0];
+  const rows = db.prepare(
+    `SELECT kind, actual_at FROM punches
+     WHERE user_id=? AND actual_at BETWEEN ? AND ? ORDER BY actual_at`
+  ).all(user.id, ca.start - 2 * 3600000, t);   // nới 2 tiếng cho người vào sớm
+
+  const vao = [...rows].reverse().find((r) => r.kind === 'in');
+  const ra  = [...rows].reverse().find((r) => r.kind === 'out');
+
+  // Chưa bấm vào lần nào trong ca này -> chưa trực, cũng không phải đã xuống
+  if (!vao) return false;
+
+  // Chỉ tính là đã xuống khi lượt RA nằm SAU lượt VÀO của chính ca này
+  return !!(ra && ra.actual_at > vao.actual_at);
 }
 
 /* Huỷ các lượt điểm danh còn treo — gọi khi bấm Xuống ca */
@@ -2137,7 +2223,7 @@ function audit(actor, action, detail, ip) {
 
 module.exports = {
   db, DEPTS, BRANDS, AUTO_CLOSE_GRACE_MIN, newKey,
-  savePhoto, photoAbsPath,
+  savePhoto, photoAbsPath, donAnhCu, dungLuongAnh, PHOTO_KEEP_DAYS,
   types, typeByCode, sweepStale, openFor, holderOf, lanes, present,
   startActivity, stopActivity, stateFor, history, allUsers, audit, lockKey,
   PUNCH_KINDS, PUNCH_ACTIVE, LATE_LEVELS, MAX_OFF_PER_MONTH,
