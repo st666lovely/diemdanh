@@ -455,6 +455,79 @@ app.get('/api/admin/shift-log', requireUser, requireAdmin, (req, res) => {
 });
 
 /**
+ * Xuất bảng Vào/Ra ca ra Excel để gửi kế toán tính lương.
+ * Hai sheet: tổng hợp theo người (kế toán dùng) và chi tiết từng ca (để đối chiếu).
+ */
+app.get('/api/admin/shift-log/export.xlsx', requireUser, requireAdmin, (req, res) => {
+  const XLSX = require('xlsx');
+  const { rows } = D.shiftLog({ ...req.query, limit: 100000 }, req.scope);
+
+  const gio = (t) => (t ? new Date(t).toLocaleTimeString('vi-VN', { hour12: false }).slice(0, 5) : '');
+  const ngay = (d) => (d ? d.split('-').reverse().join('/') : '');
+  const soGio = (phut) => (phut == null ? '' : Math.round((phut / 60) * 100) / 100);
+
+  const chiTiet = rows.map((r) => ({
+    'Ngày': ngay(r.day),
+    'Mã NV': r.emp_code || '',
+    'Nhân viên': r.user_name,
+    'Bộ phận': r.department || '',
+    'Brand': r.brand || '',
+    'Khu vực': r.location || '',
+    'Ca': r.shift_name || '',
+    'Vào': gio(r.in_at),
+    'Trễ vào (phút)': r.in_late ? r.in_late_min : 0,
+    'Ra': gio(r.out_at) + (r.qua_dem ? ' (+1)' : ''),
+    'Trễ ra (phút)': r.out_late ? r.out_late_min : 0,
+    'Số giờ': soGio(r.duration_min),
+    'OT (giờ)': r.ot || 0,
+    'Ghi chú': r.missing_out ? 'QUÊN BẤM RA'
+             : r.in_progress ? 'đang trực'
+             : (!r.in_at ? 'thiếu giờ vào' : ''),
+  }));
+
+  const theoNguoi = new Map();
+  for (const r of rows) {
+    if (!theoNguoi.has(r.user_id)) {
+      theoNguoi.set(r.user_id, {
+        'Mã NV': r.emp_code || '', 'Nhân viên': r.user_name,
+        'Bộ phận': r.department || '', 'Brand': r.brand || '', 'Khu vực': r.location || '',
+        'Số ca': 0, 'Tổng giờ': 0, 'Số lần trễ vào': 0, 'Tổng phút trễ': 0,
+        'Số ca có OT': 0, 'Tổng giờ OT': 0, 'Số ca quên bấm ra': 0,
+      });
+    }
+    const o = theoNguoi.get(r.user_id);
+    o['Số ca'] += 1;
+    if (r.duration_min != null && !r.in_progress) o['Tổng giờ'] += r.duration_min / 60;
+    if (r.in_late) { o['Số lần trễ vào'] += 1; o['Tổng phút trễ'] += r.in_late_min || 0; }
+    if (r.ot) { o['Số ca có OT'] += 1; o['Tổng giờ OT'] += r.ot; }
+    if (r.missing_out) o['Số ca quên bấm ra'] += 1;
+  }
+  const tongHop = [...theoNguoi.values()]
+    .map((o) => ({ ...o, 'Tổng giờ': Math.round(o['Tổng giờ'] * 100) / 100 }))
+    .sort((a, b) => String(a['Nhân viên']).localeCompare(String(b['Nhân viên']), 'vi'));
+
+  const wb = XLSX.utils.book_new();
+  const s2 = XLSX.utils.json_to_sheet(tongHop);
+  const s1 = XLSX.utils.json_to_sheet(chiTiet);
+  s2['!cols'] = [{ wch: 10 }, { wch: 20 }, { wch: 12 }, { wch: 8 }, { wch: 8 },
+                 { wch: 7 }, { wch: 9 }, { wch: 13 }, { wch: 13 }, { wch: 12 },
+                 { wch: 11 }, { wch: 17 }];
+  s1['!cols'] = [{ wch: 11 }, { wch: 10 }, { wch: 20 }, { wch: 12 }, { wch: 8 },
+                 { wch: 8 }, { wch: 16 }, { wch: 7 }, { wch: 13 }, { wch: 10 },
+                 { wch: 12 }, { wch: 8 }, { wch: 9 }, { wch: 15 }];
+  XLSX.utils.book_append_sheet(wb, s2, 'Tong hop luong');
+  XLSX.utils.book_append_sheet(wb, s1, 'Chi tiet tung ca');
+
+  const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+  const ky = [req.query.from, req.query.to].filter(Boolean).join('_den_')
+    || new Date().toISOString().slice(0, 10);
+  res.setHeader('Content-Type',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="vao-ra-ca-${ky}.xlsx"`);
+  res.send(buf);
+});
+
+/**
  * Nhập chấm công quá khứ từ file Excel/CSV.
  * Cột: Ma NV (hoặc Ten) · Ngay · Vao · Ra
  * Dùng khi triển khai giữa tháng và cần bù dữ liệu để tính lương đủ kỳ.
