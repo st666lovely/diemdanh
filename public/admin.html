@@ -2462,7 +2462,8 @@ function setTab(k) {
   if ($('#pageDesc')) $('#pageDesc').textContent = meta[1];
   if ($('#crumbTitle')) $('#crumbTitle').textContent = meta[2];
 
-  $('#exp').hidden = !(k === 'b' || k === 'l');
+  $('#exp').hidden = !(k === 'b' || k === 'l' || k === 'sl');
+  $('#exp').textContent = k === 'sl' ? 'Xuất bảng lương (Excel)' : 'Xuất Excel';
   if (k === 'b') { renderBoard(); startBoardTimer(); }
   else if (k === 'l') loadLate();
   else if (k === 'o') loadOffs();
@@ -2474,6 +2475,15 @@ function setTab(k) {
 }
 Object.entries(PANES).forEach(([k, [btn]]) => $('#' + btn).addEventListener('click', () => setTab(k)));
 $('#exp').addEventListener('click', () => {
+  // Vào/Ra ca xuất Excel hai sheet cho kế toán, không phải CSV như hai tab kia
+  if (TAB === 'sl') {
+    if (!punchQ.from || !punchQ.to) {
+      if (!confirm('Chưa chọn khoảng ngày — file sẽ lấy toàn bộ dữ liệu đang có.\n\n'
+        + 'Tính lương thì nên đặt Từ ngày / Đến ngày cho đúng kỳ.\n\nVẫn xuất?')) return;
+    }
+    location.href = '/api/admin/shift-log/export.xlsx?' + qp();
+    return;
+  }
   location.href = (TAB === 'b' ? '/api/admin/export.csv?' : '/api/punches/export.csv?')
     + (TAB === 'l' ? new URLSearchParams({ ...Object.fromEntries(new URLSearchParams(qp())), only_late: 1 }) : qp());
 });
