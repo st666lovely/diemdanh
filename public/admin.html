@@ -2144,12 +2144,12 @@ async function loadShiftLog() {
     <td>${x.day.split('-').reverse().join('/')}
       ${x.shift_name ? `<div class="sub">${x.shift_name}</div>` : ''}
       ${x.qua_dem ? '<div class="sub">ra sáng hôm sau</div>' : ''}</td>
-    <td class="c mono">${gio(x.in_at)}</td>
-    <td class="c">${x.in_at ? treBadge(x.in_late, x.in_late_min) : '<span class="sub">—</span>'}</td>
-    <td class="c mono">${x.out_at ? gio(x.out_at) + (x.qua_dem ? ' <span class="pill">+1</span>' : '')
+    <td class="c mono"${x.in_punch_id ? ` ondblclick="suaGio(${x.in_punch_id},'lên ca','${esc(x.user_name).replace(/'/g, "\\'")}','${gio(x.in_at)}')"` : ''}>${gio(x.in_at)}</td>
+    <td class="c"${x.in_punch_id ? ` ondblclick="suaTre(${x.in_punch_id},'lên ca','${esc(x.user_name).replace(/'/g, "\\'")}',${x.in_late_min || 0})"` : ''}>${x.in_at ? treBadge(x.in_late, x.in_late_min) : '<span class="sub">—</span>'}</td>
+    <td class="c mono"${x.out_punch_id ? ` ondblclick="suaGio(${x.out_punch_id},'xuống ca','${esc(x.user_name).replace(/'/g, "\\'")}','${x.out_at ? gio(x.out_at) : ''}')"` : ''}>${x.out_at ? gio(x.out_at) + (x.qua_dem ? ' <span class="pill">+1</span>' : '')
       : x.in_progress ? '<span class="pill pri"><span class="dot"></span>đang trực</span>'
       : '<span class="pill red">quên bấm ra</span>'}</td>
-    <td class="c">${x.out_at ? treBadge(x.out_late, x.out_late_min) : '<span class="sub">—</span>'}</td>
+    <td class="c"${x.out_punch_id ? ` ondblclick="suaTre(${x.out_punch_id},'xuống ca','${esc(x.user_name).replace(/'/g, "\\'")}',${x.out_late_min || 0})"` : ''}>${x.out_at ? treBadge(x.out_late, x.out_late_min) : '<span class="sub">—</span>'}</td>
     <td class="c">${x.duration_min != null
       ? `${x.in_progress ? '~' : ''}${Math.floor(x.duration_min / 60)}h${String(x.duration_min % 60).padStart(2, '0')}`
       : '<span class="sub">—</span>'}</td>
@@ -2176,6 +2176,30 @@ async function loadShiftLog() {
       <div class="kpi red"><div class="n">${d.stats.missing_out}</div><div class="l">Quên bấm ra</div></div>
       <div class="kpi"><div class="n">${d.stats.ot_days}</div><div class="l">Ca có OT</div></div>
     </div>
+    <div class="sec"><span class="t">Bù chấm công từ file</span><span class="rule"></span>
+      <span class="r">dùng khi triển khai giữa tháng, cần bù dữ liệu cho đủ kỳ lương</span></div>
+    <div class="card card-p" style="margin-bottom:var(--s4)">
+      <div class="row">
+        <div class="f"><label>File chấm công</label><input type="file" id="ccFile" accept=".xlsx,.xls,.csv"></div>
+        <button class="btn" onclick="nhapChamCong(true)">Xem trước</button>
+        <button class="btn btn-pri" onclick="nhapChamCong(false)">Nhập</button>
+        <button class="btn btn-red" onclick="nhapChamCong(false, true)">Nhập đè</button>
+      </div>
+      <div id="ccOut" class="sub" style="margin-top:10px;line-height:1.6"></div>
+      <div class="note" style="font-size:12.5px;color:var(--tx-3);margin-top:8px;line-height:1.55">
+        Mỗi dòng một ca. Cột cần có: <span class="mono">Ma NV</span> (hoặc <span class="mono">Ten</span>) ·
+        <span class="mono">Ngay</span> · <span class="mono">Vao</span> · <span class="mono">Ra</span>.
+        Tiêu đề nằm ở dòng nào cũng được.<br>
+        Ngày viết <span class="mono">16/09/2026</span> hoặc <span class="mono">2026-09-16</span>.
+        Giờ viết <span class="mono">13:58</span>, nhận cả ô Excel định dạng Time.
+        Giờ ra nhỏ hơn giờ vào thì hiểu là <b>ca đêm</b>, tự tính sang hôm sau.<br>
+        Ô giờ để trống là ngày nghỉ, bỏ qua. <b>Trễ tính lại theo lịch ca</b> của ngày đó —
+        chưa nhập lịch ca tháng thì ghi 0 phút chứ không đoán.<br>
+        <b>Nhập</b> bỏ qua ca đã có sẵn. <b>Nhập đè</b> xoá bản ghi cũ của ngày đó rồi ghi lại —
+        chỉ dùng khi cần sửa dữ liệu đã nhập sai.
+      </div>
+    </div>
+
     ${punchFilters({ ...d, kinds: {}, levels: {}, is_admin: true }, 'sl')}
     <div class="tw"><table>
       <thead><tr><th class="wide">Nhân viên</th><th>Ngày</th><th class="c">Vào</th>
@@ -2184,6 +2208,91 @@ async function loadShiftLog() {
       <tbody>${trs || '<tr><td colspan="9" class="empty">Chưa có ca nào trong kỳ này.</td></tr>'}</tbody>
     </table></div>
     <div class="sub" style="margin-top:var(--s3)">${d.rows.length} ca · mới nhất trước</div>`;
+}
+
+/* Chức năng ẩn: bấm đúp vào ô GIỜ để chỉnh giờ bấm thật.
+   Số phút trễ tự tính lại theo lịch ca sau khi đổi giờ. */
+async function suaGio(punchId, moc, ten, hienTai) {
+  const v = prompt(`Chỉnh giờ ${moc} của ${ten}\n\n`
+    + `Hiện tại: ${hienTai || '(chưa có)'}\n`
+    + `Nhập giờ mới dạng HH:MM:`, hienTai || '');
+  if (v === null) return;
+
+  const r = await api(`/api/admin/punch/${punchId}/sua-gio`,
+    { method: 'POST', body: { gio: String(v).trim() } });
+  toast(r.ok ? 'Đã chỉnh giờ' : 'Không chỉnh được',
+    r.ok ? `${r.gio_cu} -> ${r.gio_moi} · trễ ${r.tre_cu} -> ${r.tre_moi} phút`
+         : (r.message || ''), !!r.ok);
+  if (r.ok) loadShiftLog();
+}
+
+/* Chức năng ẩn: bấm đúp vào ô trễ trong bảng Vào/Ra ca để chỉnh số phút.
+   Không có nút, không có gợi ý trên giao diện. Mọi lần chỉnh đều vào nhật ký. */
+async function suaTre(punchId, moc, ten, hienTai) {
+  const v = prompt(`Chỉnh số phút trễ ${moc} của ${ten}\n\n`
+    + `Hiện tại: ${hienTai} phút\n`
+    + `Nhập số phút mới (0 = đúng giờ):`, hienTai);
+  if (v === null) return;
+  const phut = Number(String(v).trim());
+  if (!Number.isFinite(phut) || phut < 0) return toast('Số không hợp lệ', 'Nhập số phút, 0 trở lên.', false);
+
+  const r = await api(`/api/admin/punch/${punchId}/sua-tre`,
+    { method: 'POST', body: { phut } });
+  toast(r.ok ? 'Đã chỉnh' : 'Không chỉnh được',
+    r.ok ? `${r.cu} -> ${r.moi} phút` : (r.message || ''), !!r.ok);
+  if (r.ok) loadShiftLog();
+}
+
+async function nhapChamCong(thu, ghiDe) {
+  const f = $('#ccFile').files[0];
+  const out = $('#ccOut');
+  if (!f) return toast('Chưa chọn file', 'Chọn file .xlsx hoặc .csv trước.', false);
+  if (ghiDe && !confirm('Nhập đè sẽ XOÁ bản ghi chấm công cũ của những ngày có trong file.\n\nTiếp tục?')) return;
+
+  out.textContent = 'Đang đọc file…';
+  let r;
+  try {
+    const res = await fetch('/api/admin/cham-cong/nhap?thu=' + (thu ? 1 : 0)
+      + '&ghi_de=' + (ghiDe ? 1 : 0),
+      { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: f });
+    if (!(res.headers.get('content-type') || '').includes('application/json')) {
+      out.innerHTML = `<b style="color:var(--red)">Máy chủ trả lỗi ${res.status}.</b> `
+        + (res.status === 404 ? 'server.js trên máy chủ chưa được cập nhật.' : 'Xem Logs trên Render.');
+      return;
+    }
+    r = await res.json();
+  } catch (e) { out.innerHTML = '<b style="color:var(--red)">Không gọi được máy chủ.</b>'; return; }
+
+  if (!r.ok) { out.innerHTML = `<b style="color:var(--red)">${esc(r.message || 'Không đọc được file.')}</b>`; return; }
+
+  const p = [];
+  if (r.thu) {
+    p.push(`<b>Xem trước: ${r.so_dong} ca sẽ được nhập.</b>`);
+    if (r.xem_truoc.length) {
+      p.push('<div class="tw" style="margin-top:8px"><table><thead><tr>'
+        + '<th>Nhân viên</th><th>Ngày</th><th>Vào</th><th>Ra</th></tr></thead><tbody>'
+        + r.xem_truoc.map((x) => `<tr><td>${esc(x.ho_ten)}</td>`
+            + `<td class="mono">${x.day.split('-').reverse().join('/')}</td>`
+            + `<td class="mono">${x.vao || '—'}</td><td class="mono">${x.ra || '—'}</td></tr>`).join('')
+        + '</tbody></table></div>');
+      if (r.so_dong > 15) p.push(`<span class="sub">… và ${r.so_dong - 15} ca nữa</span>`);
+    }
+  } else {
+    p.push(`<b style="color:var(--pri)">Đã nhập ${r.them} bản ghi.</b>`
+      + (r.bo_qua ? ` Bỏ qua ${r.bo_qua} (đã có sẵn hoặc không có giờ).` : ''));
+    toast('Đã nhập chấm công', `${r.them} bản ghi`, true);
+    loadShiftLog();
+  }
+  if (r.khong_thay && r.khong_thay.length) {
+    p.push(`<b style="color:var(--amb)">Không khớp được ${r.khong_thay.length} người:</b> `
+      + r.khong_thay.map(esc).join(', ')
+      + '<br><span class="sub">Kiểm lại Mã NV trong tab Nhân sự có khớp với file không.</span>');
+  }
+  if (r.loi && r.loi.length) {
+    p.push(`<b style="color:var(--red)">${r.loi.length} dòng có vấn đề:</b><br>`
+      + r.loi.slice(0, 8).map(esc).join('<br>') + (r.loi.length > 8 ? '<br>…' : ''));
+  }
+  out.innerHTML = p.join('<br>');
 }
 
 /* ---------- Tab Trễ: ai trễ nhiều, không phải nhật ký từng lượt ---------- */
