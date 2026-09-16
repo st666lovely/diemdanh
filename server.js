@@ -454,6 +454,84 @@ app.get('/api/admin/shift-log', requireUser, requireAdmin, (req, res) => {
   });
 });
 
+/**
+ * Xuất bảng Vào/Ra ca ra Excel để gửi kế toán tính lương.
+ * Hai sheet: chi tiết từng ca, và tổng hợp theo người — kế toán cần sheet tổng hợp,
+ * sheet chi tiết để đối chiếu khi có thắc mắc.
+ */
+app.get('/api/admin/shift-log/export.xlsx', requireUser, requireAdmin, (req, res) => {
+  const XLSX = require('xlsx');
+  // Giới hạn cao hơn màn hình vì file xuất ra là để rà cả tháng
+  const { rows } = D.shiftLog({ ...req.query, limit: 100000 }, req.scope);
+
+  const gio = (t) => (t ? new Date(t).toLocaleTimeString('vi-VN', { hour12: false }).slice(0, 5) : '');
+  const ngay = (d) => (d ? d.split('-').reverse().join('/') : '');
+  const soGio = (phut) => (phut == null ? '' : Math.round((phut / 60) * 100) / 100);
+
+  /* --- Sheet 1: chi tiết từng ca --- */
+  const chiTiet = rows.map((r) => ({
+    'Ngày': ngay(r.day),
+    'Mã NV': r.emp_code || '',
+    'Nhân viên': r.user_name,
+    'Bộ phận': r.department || '',
+    'Brand': r.brand || '',
+    'Khu vực': r.location || '',
+    'Ca': r.shift_name || '',
+    'Vào': gio(r.in_at),
+    'Trễ vào (phút)': r.in_late ? r.in_late_min : 0,
+    'Ra': gio(r.out_at) + (r.qua_dem ? ' (+1)' : ''),
+    'Trễ ra (phút)': r.out_late ? r.out_late_min : 0,
+    'Số giờ': soGio(r.duration_min),
+    'OT (giờ)': r.ot || 0,
+    'Ghi chú': r.missing_out ? 'QUÊN BẤM RA'
+             : r.in_progress ? 'đang trực'
+             : (!r.in_at ? 'thiếu giờ vào' : ''),
+  }));
+
+  /* --- Sheet 2: tổng hợp theo người --- */
+  const theoNguoi = new Map();
+  for (const r of rows) {
+    const k = r.user_id;
+    if (!theoNguoi.has(k)) {
+      theoNguoi.set(k, {
+        'Mã NV': r.emp_code || '', 'Nhân viên': r.user_name,
+        'Bộ phận': r.department || '', 'Brand': r.brand || '', 'Khu vực': r.location || '',
+        'Số ca': 0, 'Tổng giờ': 0, 'Số lần trễ vào': 0, 'Tổng phút trễ': 0,
+        'Số ca có OT': 0, 'Tổng giờ OT': 0, 'Số ca quên bấm ra': 0,
+      });
+    }
+    const o = theoNguoi.get(k);
+    o['Số ca'] += 1;
+    if (r.duration_min != null && !r.in_progress) o['Tổng giờ'] += r.duration_min / 60;
+    if (r.in_late) { o['Số lần trễ vào'] += 1; o['Tổng phút trễ'] += r.in_late_min || 0; }
+    if (r.ot) { o['Số ca có OT'] += 1; o['Tổng giờ OT'] += r.ot; }
+    if (r.missing_out) o['Số ca quên bấm ra'] += 1;
+  }
+  const tongHop = [...theoNguoi.values()]
+    .map((o) => ({ ...o, 'Tổng giờ': Math.round(o['Tổng giờ'] * 100) / 100 }))
+    .sort((a, b) => String(a['Nhân viên']).localeCompare(String(b['Nhân viên']), 'vi'));
+
+  const wb = XLSX.utils.book_new();
+  const s2 = XLSX.utils.json_to_sheet(tongHop);
+  const s1 = XLSX.utils.json_to_sheet(chiTiet);
+  s2['!cols'] = [{ wch: 10 }, { wch: 20 }, { wch: 12 }, { wch: 8 }, { wch: 8 },
+                 { wch: 7 }, { wch: 9 }, { wch: 13 }, { wch: 13 }, { wch: 12 },
+                 { wch: 11 }, { wch: 17 }];
+  s1['!cols'] = [{ wch: 11 }, { wch: 10 }, { wch: 20 }, { wch: 12 }, { wch: 8 },
+                 { wch: 8 }, { wch: 16 }, { wch: 7 }, { wch: 13 }, { wch: 10 },
+                 { wch: 12 }, { wch: 8 }, { wch: 9 }, { wch: 15 }];
+  XLSX.utils.book_append_sheet(wb, s2, 'Tong hop luong');
+  XLSX.utils.book_append_sheet(wb, s1, 'Chi tiet tung ca');
+
+  const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+  const ky = [req.query.from, req.query.to].filter(Boolean).join('_den_')
+    || new Date().toISOString().slice(0, 10);
+  res.setHeader('Content-Type',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="vao-ra-ca-${ky}.xlsx"`);
+  res.send(buf);
+});
+
 /* --- Xem lượt chi tiết theo ngày --- */
 app.get('/api/admin/rollcalls/detail', requireUser, requireAdmin, (req, res) => {
   const u = D.db.prepare('SELECT * FROM users WHERE id=?').get(+req.query.user_id);
