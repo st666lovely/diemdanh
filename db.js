@@ -830,6 +830,137 @@ function shiftToday(user) {
 }
 
 /* Lịch sử chấm công — quản trị xem hết, nhân viên chỉ thấy của mình */
+/**
+ * Nhập chấm công quá khứ — dùng khi hệ thống mới triển khai giữa tháng và
+ * cần bù dữ liệu từ đầu tháng để tính lương cho đủ kỳ.
+ *
+ * Mỗi dòng: { user_id, day 'YYYY-MM-DD', vao 'HH:MM', ra 'HH:MM' }
+ * Giờ hiểu theo múi giờ của chính nhân viên đó. Giờ ra nhỏ hơn giờ vào là ca đêm,
+ * tự cộng sang hôm sau.
+ *
+ * Trễ tính đúng như lúc bấm thật: so với lịch ca của ngày đó, không có lịch thì
+ * ghi 0 phút chứ không đoán.
+ */
+function nhapChamCong(danhSach, ghiDe = false) {
+  const kq = { them: 0, bo_qua: 0, loi: [] };
+  const daCo = db.prepare(
+    "SELECT id FROM punches WHERE user_id=? AND kind=? AND actual_at BETWEEN ? AND ?");
+  const xoaCu = db.prepare(
+    "SELECT id FROM punches WHERE user_id=? AND actual_at BETWEEN ? AND ? AND kind IN ('in','out')");
+  const themMoi = db.prepare(`INSERT INTO punches
+    (user_id,kind,brand,department,scheduled_at,actual_at,late_minutes,late_level,ip,user_agent)
+    VALUES (?,?,?,?,?,?,?,?,?,?)`);
+
+  const chay = db.transaction((ds) => {
+    for (const d of ds) {
+      const u = db.prepare('SELECT * FROM users WHERE id=?').get(d.user_id);
+      if (!u) { kq.loi.push(`Không có nhân viên id ${d.user_id}`); continue; }
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(d.day)) { kq.loi.push(`${u.name}: ngày "${d.day}" sai định dạng`); continue; }
+
+      const tz = tzOf(u.location);
+      const moc = [];
+      if (d.vao) moc.push(['in', d.vao]);
+      if (d.ra)  moc.push(['out', d.ra]);
+      if (!moc.length) { kq.bo_qua++; continue; }
+
+      const tVao = d.vao ? zonedToUtc(d.day, d.vao, tz).getTime() : null;
+
+      // Xoá bản ghi cũ của đúng ngày ca đó khi chọn ghi đè
+      if (ghiDe && tVao) {
+        const dau = tVao - 12 * 3600000, cuoi = tVao + 24 * 3600000;
+        for (const r of xoaCu.all(u.id, dau, cuoi)) {
+          db.prepare('DELETE FROM punches WHERE id=?').run(r.id);
+        }
+      }
+
+      for (const [kind, hm] of moc) {
+        if (!/^\d{1,2}:\d{2}$/.test(hm)) { kq.loi.push(`${u.name} ${d.day}: giờ "${hm}" sai định dạng`); continue; }
+        let at = zonedToUtc(d.day, hm, tz).getTime();
+        // Ca đêm: giờ ra nhỏ hơn giờ vào nghĩa là sang hôm sau
+        if (kind === 'out' && tVao && at <= tVao) at += 24 * 3600000;
+
+        if (!ghiDe && daCo.get(u.id, kind, at - 60000, at + 60000)) { kq.bo_qua++; continue; }
+
+        const sched = scheduledFor(u, kind, at);
+        const diff = sched ? Math.floor((at - sched) / 60000) : 0;
+        themMoi.run(u.id, kind, u.brand, u.department, sched, at,
+          Math.max(0, diff), lateOf(kind, diff), 'nhap-tay', 'import');
+        kq.them++;
+      }
+    }
+  });
+  chay(danhSach);
+  return kq;
+}
+
+/**
+ * Chỉnh số phút trễ của một lần bấm.
+ * Chỉ đụng tới con số trễ, KHÔNG đổi giờ bấm thật — giờ thật là bằng chứng,
+ * sửa nó đi thì nhật ký mất giá trị đối chiếu.
+ * Mức trễ (in5/in30/out60) tính lại theo đúng ngưỡng hệ thống.
+ */
+function suaPhutTre(punchId, phut) {
+  const r = db.prepare('SELECT * FROM punches WHERE id=?').get(punchId);
+  if (!r) return { ok: false, message: 'Không tìm thấy bản ghi.' };
+  if (!['in', 'out'].includes(r.kind)) return { ok: false, message: 'Chỉ chỉnh được lượt lên/xuống ca.' };
+
+  const moi = Math.max(0, Math.round(Number(phut) || 0));
+  const cu = r.late_minutes || 0;
+  db.prepare('UPDATE punches SET late_minutes=?, late_level=? WHERE id=?')
+    .run(moi, lateOf(r.kind, moi), punchId);
+
+  return { ok: true, cu, moi, kind: r.kind, user_id: r.user_id,
+    muc_moi: lateOf(r.kind, moi) };
+}
+
+/**
+ * Chỉnh GIỜ BẤM của một lượt lên/xuống ca.
+ * Giờ nhập theo múi giờ của chính nhân viên đó, dạng 'HH:MM'.
+ * Số phút trễ tự tính lại theo lịch ca — trừ khi truyền phut để ép cứng.
+ */
+function suaGioBam(punchId, hm, phutEp) {
+  const r = db.prepare('SELECT * FROM punches WHERE id=?').get(punchId);
+  if (!r) return { ok: false, message: 'Không tìm thấy bản ghi.' };
+  if (!['in', 'out'].includes(r.kind)) return { ok: false, message: 'Chỉ chỉnh được lượt lên/xuống ca.' };
+  if (!/^\d{1,2}:\d{2}$/.test(String(hm).trim())) {
+    return { ok: false, message: 'Giờ phải dạng HH:MM, ví dụ 14:05.' };
+  }
+
+  const u = db.prepare('SELECT * FROM users WHERE id=?').get(r.user_id);
+  const tz = tzOf(u && u.location);
+
+  // Giữ nguyên NGÀY CA của bản ghi, chỉ đổi giờ trong ngày đó.
+  // Ca đêm: lượt 'out' rơi sang hôm sau thì giữ nguyên tính chất đó.
+  const ngayCa = shiftDayOf(r.user_id, r.actual_at, tz);
+  let at = zonedToUtc(ngayCa, String(hm).trim(), tz).getTime();
+
+  if (r.kind === 'out') {
+    // Tìm lượt VÀO của ĐÚNG ca này, không tìm theo khung giờ quanh giờ mới —
+    // giờ ra 00:15 nằm trước giờ vào 13:58 nên khung giờ sẽ trượt mất lượt vào.
+    const moc0 = zonedToUtc(ngayCa, '00:00', tz).getTime();
+    const vao = db.prepare(
+      `SELECT actual_at FROM punches WHERE user_id=? AND kind='in'
+         AND actual_at BETWEEN ? AND ? ORDER BY actual_at DESC LIMIT 1`)
+      .all(r.user_id, moc0 - 12 * 3600000, moc0 + 36 * 3600000)
+      .find((x) => shiftDayOf(r.user_id, x.actual_at, tz) === ngayCa);
+    if (vao && at <= vao.actual_at) at += 24 * 3600000;   // ra sau nửa đêm
+  }
+
+  const sched = r.scheduled_at;
+  const tinh = sched ? Math.max(0, Math.floor((at - sched) / 60000)) : 0;
+  const phut = phutEp == null ? tinh : Math.max(0, Math.round(Number(phutEp) || 0));
+
+  const gioCu = new Date(r.actual_at).toLocaleTimeString('vi-VN',
+    { hour12: false, timeZone: tz }).slice(0, 5);
+
+  db.prepare('UPDATE punches SET actual_at=?, late_minutes=?, late_level=? WHERE id=?')
+    .run(at, phut, lateOf(r.kind, phut), punchId);
+
+  return { ok: true, kind: r.kind, user_id: r.user_id,
+    gio_cu: gioCu, gio_moi: String(hm).trim(),
+    tre_cu: r.late_minutes || 0, tre_moi: phut, muc_moi: lateOf(r.kind, phut) };
+}
+
 function punchHistory(f = {}, viewer = null) {
   const w = [], p = [];
   if (viewer && viewer.role === 'staff') { w.push('p.user_id=?'); p.push(viewer.id); }
@@ -958,18 +1089,21 @@ function shiftLog(f = {}, scope = null) {
         in_at: null, out_at: null, in_late: null, in_late_min: 0,
         out_late: null, out_late_min: 0, in_sched: null, out_sched: null,
         in_photo_id: null, out_photo_id: null, in_screen_id: null, out_screen_id: null,
+        in_punch_id: null, out_punch_id: null,
       });
     }
     const o = byKey.get(k);
     if (r.kind === 'in' && (!o.in_at || r.actual_at < o.in_at)) {
       o.in_at = r.actual_at; o.in_sched = r.scheduled_at;
       o.in_late = r.late_level; o.in_late_min = r.late_minutes;
+      o.in_punch_id = r.id;
       o.in_photo_id = r.photo_path ? r.id : null;
       o.in_screen_id = r.screen_path ? r.id : null;
     }
     if (r.kind === 'out' && (!o.out_at || r.actual_at > o.out_at)) {
       o.out_at = r.actual_at; o.out_sched = r.scheduled_at;
       o.out_late = r.late_level; o.out_late_min = r.late_minutes;
+      o.out_punch_id = r.id;
       o.out_photo_id = r.photo_path ? r.id : null;
       o.out_screen_id = r.screen_path ? r.id : null;
     }
@@ -2277,7 +2411,7 @@ module.exports = {
   reportDepts, setReportDepts, getSetting, setSetting,
   REPORT_GRACE_MIN, REPORT_BLOCK_AFTER, REPORT_ALERT_AFTER,
   sweepRollCalls, releaseMakeups, activeRollCall, answerRollCall, rollCallReport, upcomingRollCalls, fireRollCall, deferRollCall,
-  rollCallByDay, activityByDay, shiftLog, shiftDayOf,
+  rollCallByDay, activityByDay, shiftLog, shiftDayOf, nhapChamCong, suaPhutTre, suaGioBam,
   RC_PER_SHIFT, RC_WINDOW_MIN, RC_MAKEUP_MIN,
   applySchedule, checkScheduleRows, scheduleOf, scheduleSummary,
 };
