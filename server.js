@@ -455,81 +455,145 @@ app.get('/api/admin/shift-log', requireUser, requireAdmin, (req, res) => {
 });
 
 /**
- * Xuất bảng Vào/Ra ca ra Excel để gửi kế toán tính lương.
- * Hai sheet: chi tiết từng ca, và tổng hợp theo người — kế toán cần sheet tổng hợp,
- * sheet chi tiết để đối chiếu khi có thắc mắc.
+ * Nhập chấm công quá khứ từ file Excel/CSV.
+ * Cột: Ma NV (hoặc Ten) · Ngay · Vao · Ra
+ * Dùng khi triển khai giữa tháng và cần bù dữ liệu để tính lương đủ kỳ.
  */
-app.get('/api/admin/shift-log/export.xlsx', requireUser, requireAdmin, (req, res) => {
+app.post('/api/admin/cham-cong/nhap', requireUser, requireAdmin,
+  express.raw({ type: '*/*', limit: '8mb' }), (req, res) => {
   const XLSX = require('xlsx');
-  // Giới hạn cao hơn màn hình vì file xuất ra là để rà cả tháng
-  const { rows } = D.shiftLog({ ...req.query, limit: 100000 }, req.scope);
+  try {
+    const wb = XLSX.read(req.body, { type: 'buffer', cellDates: true });
+    const sheet = wb.Sheets[wb.SheetNames[0]];
+    const raw = XLSX.utils.sheet_to_json(sheet, { header: 1, blankrows: false });
+    if (!raw.length) return res.json({ ok: false, message: 'File trống.' });
 
-  const gio = (t) => (t ? new Date(t).toLocaleTimeString('vi-VN', { hour12: false }).slice(0, 5) : '');
-  const ngay = (d) => (d ? d.split('-').reverse().join('/') : '');
-  const soGio = (phut) => (phut == null ? '' : Math.round((phut / 60) * 100) / 100);
+    const bo = (v) => String(v == null ? '' : v).normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '').replace(/đ/gi, 'd')
+      .toLowerCase().replace(/[^a-z0-9]/g, '');
+    const TU = {
+      ma:  ['manv', 'ma', 'macode', 'manhanvien', 'code', 'empcode'],
+      ten: ['ten', 'hoten', 'nhanvien', 'name'],
+      ngay:['ngay', 'date', 'day'],
+      vao: ['vao', 'gio vao', 'giovao', 'in', 'checkin', 'gioVaoCa'],
+      ra:  ['ra', 'giora', 'out', 'checkout'],
+    };
 
-  /* --- Sheet 1: chi tiết từng ca --- */
-  const chiTiet = rows.map((r) => ({
-    'Ngày': ngay(r.day),
-    'Mã NV': r.emp_code || '',
-    'Nhân viên': r.user_name,
-    'Bộ phận': r.department || '',
-    'Brand': r.brand || '',
-    'Khu vực': r.location || '',
-    'Ca': r.shift_name || '',
-    'Vào': gio(r.in_at),
-    'Trễ vào (phút)': r.in_late ? r.in_late_min : 0,
-    'Ra': gio(r.out_at) + (r.qua_dem ? ' (+1)' : ''),
-    'Trễ ra (phút)': r.out_late ? r.out_late_min : 0,
-    'Số giờ': soGio(r.duration_min),
-    'OT (giờ)': r.ot || 0,
-    'Ghi chú': r.missing_out ? 'QUÊN BẤM RA'
-             : r.in_progress ? 'đang trực'
-             : (!r.in_at ? 'thiếu giờ vào' : ''),
-  }));
-
-  /* --- Sheet 2: tổng hợp theo người --- */
-  const theoNguoi = new Map();
-  for (const r of rows) {
-    const k = r.user_id;
-    if (!theoNguoi.has(k)) {
-      theoNguoi.set(k, {
-        'Mã NV': r.emp_code || '', 'Nhân viên': r.user_name,
-        'Bộ phận': r.department || '', 'Brand': r.brand || '', 'Khu vực': r.location || '',
-        'Số ca': 0, 'Tổng giờ': 0, 'Số lần trễ vào': 0, 'Tổng phút trễ': 0,
-        'Số ca có OT': 0, 'Tổng giờ OT': 0, 'Số ca quên bấm ra': 0,
+    // Tiêu đề có thể không ở dòng đầu — tìm dòng nào chứa cột Ngay
+    let dongTieuDe = -1, vt = {};
+    for (let i = 0; i < Math.min(raw.length, 15); i++) {
+      const o = {};
+      raw[i].forEach((c, j) => {
+        const k = bo(c);
+        for (const [ten, ds] of Object.entries(TU)) {
+          if (o[ten] === undefined && ds.some((x) => bo(x) === k)) o[ten] = j;
+        }
       });
+      if (o.ngay !== undefined && (o.ma !== undefined || o.ten !== undefined)) {
+        dongTieuDe = i; vt = o; break;
+      }
     }
-    const o = theoNguoi.get(k);
-    o['Số ca'] += 1;
-    if (r.duration_min != null && !r.in_progress) o['Tổng giờ'] += r.duration_min / 60;
-    if (r.in_late) { o['Số lần trễ vào'] += 1; o['Tổng phút trễ'] += r.in_late_min || 0; }
-    if (r.ot) { o['Số ca có OT'] += 1; o['Tổng giờ OT'] += r.ot; }
-    if (r.missing_out) o['Số ca quên bấm ra'] += 1;
+    if (dongTieuDe < 0) {
+      return res.json({ ok: false,
+        message: 'Không tìm thấy tiêu đề. File cần có cột Ngay, và Ma NV hoặc Ten.' });
+    }
+
+    const nv = D.allUsers(req.scope).filter((u) => u.role === 'staff');
+    const theoMa  = new Map(nv.filter((u) => u.emp_code).map((u) => [bo(u.emp_code), u]));
+    const theoTen = new Map(nv.map((u) => [bo(u.name), u]));
+
+    const gioTu = (v) => {
+      if (v instanceof Date) {
+        const p = (n) => String(n).padStart(2, '0');
+        return `${p(v.getHours())}:${p(v.getMinutes())}`;
+      }
+      if (typeof v === 'number' && v > 0 && v < 1) {
+        const ph = Math.round(v * 1440);
+        return `${String(Math.floor(ph / 60)).padStart(2, '0')}:${String(ph % 60).padStart(2, '0')}`;
+      }
+      const m = String(v || '').trim().match(/^(\d{1,2})\s*[:hg.]\s*(\d{1,2})/);
+      return m ? `${String(+m[1]).padStart(2, '0')}:${String(+m[2]).padStart(2, '0')}` : null;
+    };
+    const ngayTu = (v) => {
+      if (v instanceof Date) return v.toLocaleDateString('en-CA');
+      const s2 = String(v || '').trim();
+      let m = s2.match(/^(\d{4})-(\d{2})-(\d{2})/);
+      if (m) return `${m[1]}-${m[2]}-${m[3]}`;
+      m = s2.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/);   // dd/mm/yyyy
+      if (m) return `${m[3]}-${String(+m[2]).padStart(2, '0')}-${String(+m[1]).padStart(2, '0')}`;
+      return null;
+    };
+
+    const ds = [], loi = [], khongThay = new Set();
+    for (let i = dongTieuDe + 1; i < raw.length; i++) {
+      const r = raw[i];
+      if (!r || !r.length) continue;
+      const ma  = vt.ma  !== undefined ? bo(r[vt.ma])  : '';
+      const ten = vt.ten !== undefined ? bo(r[vt.ten]) : '';
+      const u = (ma && theoMa.get(ma)) || (ten && theoTen.get(ten));
+      if (!u) {
+        if (ma || ten) khongThay.add(String(r[vt.ma] ?? r[vt.ten] ?? '').trim());
+        continue;
+      }
+      const day = ngayTu(r[vt.ngay]);
+      if (!day) { loi.push(`Dòng ${i + 1}: ngày "${r[vt.ngay]}" không đọc được`); continue; }
+      const vao = vt.vao !== undefined ? gioTu(r[vt.vao]) : null;
+      const ra  = vt.ra  !== undefined ? gioTu(r[vt.ra])  : null;
+      if (!vao && !ra) continue;   // ngày nghỉ, bỏ qua
+      ds.push({ user_id: u.id, ho_ten: u.name, day, vao, ra });
+    }
+
+    if (req.query.thu === '1') {
+      return res.json({ ok: true, thu: true, so_dong: ds.length,
+        xem_truoc: ds.slice(0, 15), loi,
+        khong_thay: [...khongThay].slice(0, 20) });
+    }
+
+    const kq = D.nhapChamCong(ds, req.query.ghi_de === '1');
+    D.audit(req.user, 'cham_cong_import',
+      `${kq.them} ban ghi, ${kq.bo_qua} bo qua`, req.ip);
+    res.json({ ok: true, ...kq, loi: [...loi, ...kq.loi],
+      khong_thay: [...khongThay].slice(0, 20) });
+  } catch (e) {
+    res.json({ ok: false, message: 'Không đọc được file: ' + e.message });
   }
-  const tongHop = [...theoNguoi.values()]
-    .map((o) => ({ ...o, 'Tổng giờ': Math.round(o['Tổng giờ'] * 100) / 100 }))
-    .sort((a, b) => String(a['Nhân viên']).localeCompare(String(b['Nhân viên']), 'vi'));
+});
 
-  const wb = XLSX.utils.book_new();
-  const s2 = XLSX.utils.json_to_sheet(tongHop);
-  const s1 = XLSX.utils.json_to_sheet(chiTiet);
-  s2['!cols'] = [{ wch: 10 }, { wch: 20 }, { wch: 12 }, { wch: 8 }, { wch: 8 },
-                 { wch: 7 }, { wch: 9 }, { wch: 13 }, { wch: 13 }, { wch: 12 },
-                 { wch: 11 }, { wch: 17 }];
-  s1['!cols'] = [{ wch: 11 }, { wch: 10 }, { wch: 20 }, { wch: 12 }, { wch: 8 },
-                 { wch: 8 }, { wch: 16 }, { wch: 7 }, { wch: 13 }, { wch: 10 },
-                 { wch: 12 }, { wch: 8 }, { wch: 9 }, { wch: 15 }];
-  XLSX.utils.book_append_sheet(wb, s2, 'Tong hop luong');
-  XLSX.utils.book_append_sheet(wb, s1, 'Chi tiet tung ca');
+/**
+ * Chỉnh số phút trễ của một lượt bấm. Chức năng ẩn — không có nút trên giao diện,
+ * bấm đúp vào ô trễ trong bảng Vào/Ra ca mới mở.
+ *
+ * Mọi lần chỉnh đều vào nhật ký kiểm toán kèm lý do. Bảng này dùng tính lương,
+ * nên sửa mà không để lại vết là tự bỏ mất thứ bảo vệ mình khi có tranh chấp.
+ */
+app.post('/api/admin/punch/:id/sua-tre', requireUser, requireAdmin, (req, res) => {
+  const b = req.body || {};
+  const ly_do = String(b.ly_do || '').trim();
 
-  const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
-  const ky = [req.query.from, req.query.to].filter(Boolean).join('_den_')
-    || new Date().toISOString().slice(0, 10);
-  res.setHeader('Content-Type',
-    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-  res.setHeader('Content-Disposition', `attachment; filename="vao-ra-ca-${ky}.xlsx"`);
-  res.send(buf);
+  const r = D.suaPhutTre(+req.params.id, b.phut);
+  if (!r.ok) return res.status(404).json(r);
+
+  const u = D.db.prepare('SELECT name, emp_code FROM users WHERE id=?').get(r.user_id) || {};
+  D.audit(req.user, 'sua_phut_tre',
+    `${u.name || r.user_id} (${u.emp_code || '—'}) · ${r.kind === 'in' ? 'lên ca' : 'xuống ca'} · `
+    + `${r.cu} -> ${r.moi} phút` + (ly_do ? ` · ${ly_do}` : ''), req.ip);
+
+  res.json({ ok: true, ...r });
+});
+
+/** Chỉnh giờ bấm thật của một lượt lên/xuống ca. Chức năng ẩn. */
+app.post('/api/admin/punch/:id/sua-gio', requireUser, requireAdmin, (req, res) => {
+  const b = req.body || {};
+  const r = D.suaGioBam(+req.params.id, b.gio, b.phut);
+  if (!r.ok) return res.status(400).json(r);
+
+  const u = D.db.prepare('SELECT name, emp_code FROM users WHERE id=?').get(r.user_id) || {};
+  D.audit(req.user, 'sua_gio_bam',
+    `${u.name || r.user_id} (${u.emp_code || '—'}) · ${r.kind === 'in' ? 'lên ca' : 'xuống ca'} · `
+    + `${r.gio_cu} -> ${r.gio_moi} · trễ ${r.tre_cu} -> ${r.tre_moi} phút`
+    + (b.ly_do ? ` · ${String(b.ly_do).trim()}` : ''), req.ip);
+
+  res.json(r);
 });
 
 /* --- Xem lượt chi tiết theo ngày --- */
