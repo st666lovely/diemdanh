@@ -8,7 +8,7 @@
    Mọi thứ dưới /api và /k luôn đi thẳng ra mạng — cache dữ liệu chấm công là sai,
    nhân viên sẽ thấy trạng thái cũ. */
 
-const CACHE = 'tram-truc-v4';
+const CACHE = 'tram-truc-v5';
 const SHELL = ['/icon-192.png', '/icon-512.png', '/icon-180.png', '/manifest.webmanifest'];
 
 self.addEventListener('install', (e) => {

@@ -456,7 +456,7 @@ function looksMobile() {
 
 async function load() {
   if (looksMobile()) { showGate('mobile'); return; }
-  const r = await fetch('/api/state');
+  const r = await fetch('/api/state?t=' + Date.now(), { cache: 'no-store' });
   if (r.status === 401) { showGate(new URLSearchParams(location.search).get('e') || 'none'); return; }
   const d = await r.json();
   skew = d.server_time - Date.now();
@@ -520,6 +520,13 @@ async function punch(kind) {
     toast('Chưa nộp báo cáo', r.message, false);
     render();
     return;
+  }
+  // /api/punch đã trả về shift mới ngay sau khi ghi DB.
+  // Áp dụng ngay để nút Lên ca/Xuống ca đổi trạng thái tức thì,
+  // không phụ thuộc vào request GET /api/state tiếp theo.
+  if (r.ok && r.shift) {
+    S.shift = r.shift;
+    render();
   }
   toast(r.ok ? (r.late_level ? 'Đã ghi nhận — có trễ' : 'Đã ghi nhận') : 'Chưa thực hiện được',
         r.message || '', r.ok && !r.late_level);

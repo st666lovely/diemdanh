@@ -230,6 +230,13 @@ app.post('/api/admin/password', requireUser, requireAdmin, (req, res) => {
    NHÂN VIÊN
    ============================================================ */
 app.get('/api/state', requireUser, (req, res) => {
+  // Trạng thái chấm công phải luôn là dữ liệu mới nhất.
+  // Không cho browser/proxy giữ response cũ sau khi vừa Lên ca/Xuống ca.
+  res.set({
+    'Cache-Control': 'no-store, no-cache, must-revalidate, private',
+    'Pragma': 'no-cache',
+    'Expires': '0',
+  });
   const ym = new Date().toISOString().slice(0, 7);
   res.json({
     ...D.stateFor(req.user),
