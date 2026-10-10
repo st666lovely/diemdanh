@@ -851,6 +851,23 @@ app.post('/api/admin/users/:id/rekey', requireUser, requireAdmin, (req, res) => 
   res.json({ ok: true, message: `Đã cấp key mới cho ${u.name}. Link cũ không dùng được nữa.`, users: D.allUsers(req.scope) });
 });
 
+app.delete('/api/admin/users/:id/hard', requireUser, requireAdmin, (req, res) => {
+  const u = targetUser(req, res); if (!u) return;
+  if (u.id === req.user.id) {
+    return res.status(400).json({ ok: false, message: 'Không thể xóa tài khoản của chính mình.' });
+  }
+  // Xóa HẲN: dùng khi thêm nhầm. Xóa luôn chấm công, điểm danh, lịch, OT của người đó.
+  const tx = D.db.transaction(() => {
+    for (const t of ['punches', 'roll_calls', 'shift_days', 'ot_records', 'day_offs', 'activities', 'report_exempt', 'off_locks']) {
+      try { D.db.prepare(`DELETE FROM ${t} WHERE user_id=?`).run(u.id); } catch (e) {}
+    }
+    D.db.prepare('DELETE FROM users WHERE id=?').run(u.id);
+  });
+  tx();
+  D.audit(req.user, 'user_hard_delete', u.name, req.ip);
+  res.json({ ok: true, message: `Đã xóa hẳn ${u.name} khỏi tủ.`, users: D.allUsers(req.scope) });
+});
+
 app.delete('/api/admin/users/:id', requireUser, requireAdmin, (req, res) => {
   const u = targetUser(req, res); if (!u) return;
   if (u.id === req.user.id) {
