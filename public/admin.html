@@ -1033,10 +1033,17 @@ function toast(t, s, ok) {
 }
 
 async function api(url, opts) {
-  const r = await fetch(url, {
-    headers: { 'Content-Type': 'application/json' }, ...opts,
-    body: opts && opts.body ? JSON.stringify(opts.body) : undefined,
-  });
+  let r;
+  try {
+    r = await fetch(url, {
+      headers: { 'Content-Type': 'application/json' }, ...opts,
+      body: opts && opts.body ? JSON.stringify(opts.body) : undefined,
+    });
+  } catch (e) {
+    // Mất mạng / server không trả lời: trả về object có lỗi thay vì ném,
+    // để chỗ gọi không bị treo và nút không kẹt.
+    return { status: 0, ok: false, message: 'Mất kết nối máy chủ. Thử lại.' };
+  }
   return { status: r.status, ...(await r.json().catch(() => ({}))) };
 }
 
@@ -1189,7 +1196,7 @@ async function closeAct(id) {
 function linkOf(k) { return location.origin + '/k/' + k; }
 
 /* Bộ lọc bảng nhân sự — giữ trong biến để vẽ lại không mất lựa chọn */
-let uQ = { q: '', department: '', location: '', brand: '', ym: '' };
+let uQ = { q: '', department: '', location: '', brand: '', trangthai: '', lich: '', key: '', ym: '' };
 
 function uSet() {
   ['q', 'department', 'location', 'brand'].forEach(k => {
@@ -1198,8 +1205,20 @@ function uSet() {
   });
   renderUsers();
 }
+async function xoaHan(id, ten) {
+  if (!confirm('Xóa HẲN "' + ten + '" khỏi tủ?\n\n'
+    + 'Khác với Khóa — xóa hẳn là mất luôn nhân viên này và toàn bộ chấm công, điểm danh, lịch của họ. '
+    + 'Không hồi lại được.\n\nChỉ nên dùng khi thêm nhầm.')) return;
+  if (!confirm('Chắc chắn xóa "' + ten + '"? Đây là lần xác nhận cuối.')) return;
+  try {
+    const r = await api('/api/admin/users/' + id + '/hard', { method: 'DELETE' });
+    toast(r.ok ? 'Đã xóa' : 'Không xóa được', r.message || '', !!r.ok);
+    if (r.ok) { if (r.users) B.users = r.users; renderUsers(); }
+  } catch (e) { toast('Lỗi', e.message, false); }
+}
+
 function uSetMonth(v) { uQ.ym = v; load(); }     // đổi tháng phải hỏi lại máy chủ
-function uClear() { uQ = { q: '', department: '', location: '', brand: '', ym: uQ.ym }; renderUsers(); }
+function uClear() { uQ = { q: '', department: '', location: '', brand: '', trangthai: '', lich: '', key: '', ym: uQ.ym }; renderUsers(); }
 
 function renderUsers() {
   const tất = B.users.filter(u => u.role === 'staff');
@@ -1210,7 +1229,10 @@ function renderUsers() {
           || (u.key || '').toLowerCase().includes(tìm))
     && (!uQ.department || u.department === uQ.department)
     && (!uQ.location || u.location === uQ.location)
-    && (!uQ.brand || u.brand === uQ.brand));
+    && (!uQ.brand || u.brand === uQ.brand)
+    && (!uQ.trangthai || (uQ.trangthai === 'hd' ? u.is_active : !u.is_active))
+    && (!uQ.lich || (uQ.lich === 'co' ? !!u.work_days : !u.work_days))
+    && (!uQ.key || (uQ.key === 'co' ? !!u.has_key : !u.has_key)));
   const trs = staff.map(u => `<tr>
     <td class="wide"><div style="font-weight:600">${esc(u.name)}</div>
       <div style="margin-top:5px;display:inline-flex;gap:5px">
@@ -1246,7 +1268,8 @@ function renderUsers() {
       <button class="btn btn-sm" onclick="post(${u.id},'rekey')">Cấp key mới</button>
       ${u.is_active
         ? `<button class="btn btn-red btn-sm" onclick="lockU(${u.id})">Khóa</button>`
-        : `<button class="btn btn-sm" onclick="upd(${u.id},{is_active:1})">Mở</button>`}</td></tr>`).join('');
+        : `<button class="btn btn-sm" onclick="upd(${u.id},{is_active:1})">Mở</button>`}
+      <button class="btn btn-red btn-sm" style="margin-left:4px" onclick="xoaHan(${u.id},'${esc(u.name).replace(/'/g, "\\'")}')">Xóa</button></td></tr>`).join('');
 
   const depOpts = B.departments.map(d => `<option>${d}</option>`).join('');
   const scoped = B.scope !== null && B.scope !== undefined;
@@ -1318,6 +1341,21 @@ function renderUsers() {
         <select data-u="brand" onchange="uSet()"><option value="">Tất cả</option>
           ${B.brands.map(x => `<option ${uQ.brand === x ? 'selected' : ''}>${x}</option>`).join('')}
         </select></div>` : ''}
+      <div class="f"><label>Trạng thái</label>
+        <select data-u="trangthai" onchange="uSet()"><option value="">Tất cả</option>
+          <option value="hd" ${uQ.trangthai==='hd'?'selected':''}>Đang hoạt động</option>
+          <option value="khoa" ${uQ.trangthai==='khoa'?'selected':''}>Đã khóa</option>
+        </select></div>
+      <div class="f"><label>Lịch ca</label>
+        <select data-u="lich" onchange="uSet()"><option value="">Tất cả</option>
+          <option value="co" ${uQ.lich==='co'?'selected':''}>Có lịch</option>
+          <option value="chua" ${uQ.lich==='chua'?'selected':''}>Chưa có lịch</option>
+        </select></div>
+      <div class="f"><label>Mã cá nhân</label>
+        <select data-u="key" onchange="uSet()"><option value="">Tất cả</option>
+          <option value="co" ${uQ.key==='co'?'selected':''}>Đã đặt</option>
+          <option value="chua" ${uQ.key==='chua'?'selected':''}>Chưa đặt</option>
+        </select></div>
       <div class="f" style="max-width:170px"><label>Xem lịch tháng</label>
         <input type="month" value="${B.staff_ym || ''}" onchange="uSetMonth(this.value)"></div>
       <button class="btn btn-sm" onclick="uClear()">Xóa lọc</button>
@@ -2543,7 +2581,19 @@ function startRcTimer() {
 /* Tab Theo dõi phải bắt kịp lúc nhân viên vừa bấm đi — 12 giây một lần */
 function startBoardTimer() {
   clearInterval(bTimer);
-  bTimer = setInterval(() => { if (TAB === 'b' && !document.hidden) load(); }, 12000);
+  bTimer = setInterval(() => {
+    // Không refresh khi người dùng đang thao tác ô lọc (chọn ngày, gõ tìm) —
+    // nếu không, vẽ lại form sẽ làm mất giá trị đang chọn dở.
+    if (TAB === 'b' && !document.hidden && !dangNhapLieu()) load();
+  }, 12000);
+}
+
+// Có đang focus vào ô nhập không — để timer biết mà nhường.
+function dangNhapLieu() {
+  const el = document.activeElement;
+  if (!el) return false;
+  const tag = el.tagName;
+  return tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA';
 }
 
 const TAB_META = {
@@ -2615,7 +2665,7 @@ function tick() {
 
 load();
 setInterval(tick, 1000);
-setInterval(load, 20000);
+setInterval(() => { if (!document.hidden && !dangNhapLieu()) load(); }, 20000);
 </script>
 </body>
 </html>
